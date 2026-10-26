@@ -113,3 +113,21 @@ token is left in the file; store that one with `login INDEX_URL` instead.
   the key returns a different `hmac-secret` with and without user verification.
   Whether to use a PIN is decided once, at enrollment, from whether the key has
   a PIN set. To change it, delete the store file and run `login` again.
+
+## Tests
+
+`scripts/e2e.sh` runs the provider end to end against
+[virtual-fido](https://github.com/rustafariandev/virtual-fido-rs), a software
+FIDO2 key that appears as a real HID device through `/dev/uhid`. It covers
+login, get, list, rotate, logout, configure, migrate, `cargo login`/`logout`
+through the provider, and a key with a PIN. It needs sudo and python-fido2
+0.9.x, and refuses to run while another FIDO key is plugged in:
+
+```sh
+cargo build --manifest-path ../virtual-fido-rs/Cargo.toml --no-default-features
+pip install "fido2==0.9.3"
+scripts/e2e.sh ../virtual-fido-rs/target/debug/virtual-fido
+```
+
+CI (`.github/workflows/ci.yml`) runs rustfmt, clippy, `cargo test` on Linux and
+macOS, and this script on every push and pull request.

@@ -222,4 +222,3 @@ fn registry_index(config: &DocumentMut, name: &str) -> Option<String> {
     let index = config.get("registries")?.get(name)?.get("index")?;
     index.as_str().map(String::from)
 }
-

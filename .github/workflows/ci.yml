@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # rustafariandev/virtual-fido-rs commit the end-to-end tests run against.
+  VIRTUAL_FIDO_REF: 0ad4b5b88f9f1f5372a471dfd9d0c4c99ba100f3
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # hidapi (via ctap-hid-fido2) links libudev.
+      - run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      - run: cargo test
+
+  # Runs the provider against virtual-fido, a software FIDO2 key that appears as a
+  # real HID device through /dev/uhid.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: rustafariandev/virtual-fido-rs
+          ref: ${{ env.VIRTUAL_FIDO_REF }}
+          path: virtual-fido
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            virtual-fido
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      # Used by scripts/e2e.sh to set the PIN on the virtual key.
+      - run: pip install "fido2==0.9.3"
+      - name: Load the uhid kernel module
+        run: |
+          sudo modprobe uhid || true
+          if [ ! -e /dev/uhid ]; then
+            echo "::error::/dev/uhid is not available on this runner kernel ($(uname -r))"
+            exit 1
+          fi
+      # No desktop notifications needed: the key runs with --presence auto.
+      - run: cargo build --manifest-path virtual-fido/Cargo.toml --no-default-features
+      - run: scripts/e2e.sh virtual-fido/target/debug/virtual-fido
