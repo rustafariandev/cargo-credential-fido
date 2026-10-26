@@ -6,7 +6,7 @@
 use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::path::{Path, PathBuf};
-use toml_edit::{Array, DocumentMut, TableLike};
+use toml_edit::{Array, DocumentMut, Table, TableLike};
 use zeroize::Zeroizing;
 
 /// The provider name cargo resolves on `PATH`.
@@ -172,19 +172,24 @@ impl Credentials {
     /// tables left empty by it.
     pub fn remove(&mut self, name: Option<&str>) {
         let root = self.doc.as_table_mut();
-        match name {
+        let removed = match name {
             None => remove_token(root, "registry"),
             Some(name) => {
-                if let Some(registries) = root
+                let Some(registries) = root
                     .get_mut("registries")
                     .and_then(|r| r.as_table_like_mut())
-                {
-                    remove_token(registries, name);
-                    if registries.is_empty() {
-                        root.remove("registries");
-                    }
+                else {
+                    return;
+                };
+                let removed = remove_token(registries, name);
+                if registries.is_empty() {
+                    root.remove("registries");
                 }
+                removed
             }
+        };
+        if let Some(comments) = removed {
+            keep_comments(&mut self.doc, comments);
         }
     }
 
@@ -200,14 +205,78 @@ fn token_in(table: Option<&dyn TableLike>) -> Option<Zeroizing<String>> {
     Some(Zeroizing::new(token.to_string()))
 }
 
+/// Comments written above a table header that was removed, and where that
+/// header was in the file.
+struct Comments {
+    position: isize,
+    text: String,
+}
+
 /// Remove `parent.key.token`, then `parent.key` if that left it empty.
-fn remove_token(parent: &mut dyn TableLike, key: &str) {
-    if let Some(table) = parent.get_mut(key).and_then(|t| t.as_table_like_mut()) {
-        table.remove("token");
-        if table.is_empty() {
-            parent.remove(key);
+/// Returns the comments above `parent.key`'s header if it was removed, since
+/// toml_edit removes them along with the table.
+fn remove_token(parent: &mut dyn TableLike, key: &str) -> Option<Comments> {
+    let table = parent.get_mut(key)?.as_table_like_mut()?;
+    table.remove("token");
+    if !table.is_empty() {
+        return None;
+    }
+    let removed = parent.remove(key)?;
+    let table = removed.as_table()?;
+    let text = table.decor().prefix()?.as_str()?;
+    if !text.contains('#') {
+        return None;
+    }
+    Some(Comments {
+        position: table.position()?,
+        text: text.to_string(),
+    })
+}
+
+/// Put `comments` above the table header that now follows where they were,
+/// or at the end of the file if there is none.
+fn keep_comments(doc: &mut DocumentMut, comments: Comments) {
+    let next = next_header(doc.as_table(), comments.position);
+    if let Some(table) = next.and_then(|p| header_at(doc.as_table_mut(), p)) {
+        let prefix = table
+            .decor()
+            .prefix()
+            .and_then(|p| p.as_str())
+            .unwrap_or("");
+        let prefix = format!("{}{prefix}", comments.text);
+        table.decor_mut().set_prefix(prefix);
+    } else {
+        let trailing = doc.trailing().as_str().unwrap_or("").to_string();
+        doc.set_trailing(format!("{trailing}{}", comments.text));
+    }
+}
+
+/// The position of the first table header after `after`, at any depth.
+fn next_header(table: &Table, after: isize) -> Option<isize> {
+    table
+        .iter()
+        .filter_map(|(_, item)| item.as_table())
+        .flat_map(|t| {
+            let own = t.position().filter(|&p| p > after && !t.is_implicit());
+            own.into_iter().chain(next_header(t, after))
+        })
+        .min()
+}
+
+/// The table whose header is at `position`, at any depth.
+fn header_at(table: &mut Table, position: isize) -> Option<&mut Table> {
+    for (_, item) in table.iter_mut() {
+        let Some(t) = item.as_table_mut() else {
+            continue;
+        };
+        if t.position() == Some(position) && !t.is_implicit() {
+            return Some(t);
+        }
+        if let Some(found) = header_at(t, position) {
+            return Some(found);
         }
     }
+    None
 }
 
 /// The index URL of registry `name`, as cargo would report it.
@@ -221,4 +290,65 @@ fn registry_index(config: &DocumentMut, name: &str) -> Option<String> {
     }
     let index = config.get("registries")?.get(name)?.get("index")?;
     index.as_str().map(String::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Remove the tokens of `names` from `text`, as `migrate` does.
+    fn remove(text: &str, names: &[Option<&str>]) -> String {
+        let mut creds = Credentials {
+            path: PathBuf::new(),
+            doc: text.parse().unwrap(),
+        };
+        for name in names {
+            creds.remove(*name);
+        }
+        creds.doc.to_string()
+    }
+
+    #[test]
+    fn comments_move_to_the_next_table() {
+        let text =
+            "# credentials\n[registry]\ntoken = \"a\"\n\n# bar\n[registries.bar]\ntoken = \"b\"\n";
+        assert_eq!(
+            remove(text, &[None]),
+            "# credentials\n\n# bar\n[registries.bar]\ntoken = \"b\"\n"
+        );
+    }
+
+    #[test]
+    fn comments_of_a_nested_table_move_to_its_sibling() {
+        let text =
+            "# foo\n[registries.foo]\ntoken = \"a\"\n\n# bar\n[registries.bar]\ntoken = \"b\"\n";
+        assert_eq!(
+            remove(text, &[Some("foo")]),
+            "# foo\n\n# bar\n[registries.bar]\ntoken = \"b\"\n"
+        );
+    }
+
+    #[test]
+    fn comments_of_the_last_table_move_to_the_end() {
+        let text = "[registries.bar]\ntoken = \"b\"\n\n# crates.io\n[registry]\ntoken = \"a\"\n";
+        assert_eq!(
+            remove(text, &[None]),
+            "[registries.bar]\ntoken = \"b\"\n\n# crates.io\n"
+        );
+    }
+
+    #[test]
+    fn tables_with_other_keys_are_kept() {
+        let text = "# crates.io\n[registry]\ntoken = \"a\"\ndefault = \"x\"\n";
+        assert_eq!(
+            remove(text, &[None]),
+            "# crates.io\n[registry]\ndefault = \"x\"\n"
+        );
+    }
+
+    #[test]
+    fn everything_removed_keeps_the_comments() {
+        let text = "# credentials\n[registry]\ntoken = \"a\"\n\n[registries.foo]\ntoken = \"b\"\n";
+        assert_eq!(remove(text, &[None, Some("foo")]), "# credentials\n\n");
+    }
 }
