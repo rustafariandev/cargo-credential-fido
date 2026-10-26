@@ -16,9 +16,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use zeroize::Zeroizing;
 
-/// Version 2 added `prf` to the credential. Version 1 stores are read as
-/// credentials without it.
-const STORE_VERSION: u32 = 2;
+const STORE_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize)]
 pub struct Store {
@@ -60,12 +58,11 @@ impl Store {
         let path = path()?;
         match fs::read(&path) {
             Ok(bytes) => {
-                let mut store: Store = serde_json::from_slice(&bytes)
+                let store: Store = serde_json::from_slice(&bytes)
                     .with_context(|| format!("corrupt store at {}", path.display()))?;
-                if !(1..=STORE_VERSION).contains(&store.version) {
+                if store.version != STORE_VERSION {
                     return Err(anyhow!("unsupported store version {}", store.version));
                 }
-                store.version = STORE_VERSION;
                 Ok(store)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Store::default()),

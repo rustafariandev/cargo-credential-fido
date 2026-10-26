@@ -140,11 +140,6 @@ token is left in the file; store that one with `login INDEX_URL` instead.
   the key returns a different `hmac-secret` with and without user verification.
   Whether to use a PIN is decided once, at enrollment, from whether the key has
   a PIN set. To change it, delete the store file and run `login` again.
-- Windows hashes `hmac-secret` salts as WebAuthn PRF inputs, so credentials
-  are now registered that way on every platform. A store created by 1.0.x
-  uses raw salts: it keeps working on Linux and macOS, but Windows cannot open
-  it. To use the same key and store on Windows, start a new store and log in
-  again.
 
 ## Tests
 

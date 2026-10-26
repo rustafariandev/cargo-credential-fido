@@ -1,6 +1,6 @@
 //! CTAP2 over HID, for Linux and macOS.
 
-use super::{Authenticator, Credential, Key, RP_ID, new_key, prf_salt, random_bytes};
+use super::{Authenticator, Credential, Key, RP_ID, new_key, random_bytes};
 use anyhow::{Context, Result, anyhow, bail};
 use ctap_hid_fido2::fidokey::get_assertion::get_assertion_params::Assertion;
 use ctap_hid_fido2::fidokey::get_info::InfoOption;
@@ -83,11 +83,6 @@ impl HidAuthenticator {
     }
 }
 
-/// The salt to send to the key for a store salt.
-fn salt_for(cred: &Credential, salt: &[u8; 32]) -> [u8; 32] {
-    if cred.prf { prf_salt(salt) } else { *salt }
-}
-
 impl Authenticator for HidAuthenticator {
     fn enroll(&self) -> Result<Credential> {
         let support = self.device.get_info()?.extensions;
@@ -123,12 +118,11 @@ impl Authenticator for HidAuthenticator {
         Ok(Credential {
             id: att.credential_descriptor.id,
             uv,
-            prf: true,
         })
     }
 
     fn derive_key(&self, cred: &Credential, salt: &[u8; 32]) -> Result<Key> {
-        let ext = AssertionExtension::HmacSecret(Some(salt_for(cred, salt)));
+        let ext = AssertionExtension::HmacSecret(Some(*salt));
         let mut assertions = self.hmac_secret(cred, ext)?;
         let key = extensions(&assertions).find_map(|e| match e {
             AssertionExtension::HmacSecret(Some(secret)) => Some(new_key(secret)),
@@ -144,7 +138,7 @@ impl Authenticator for HidAuthenticator {
         salt1: &[u8; 32],
         salt2: &[u8; 32],
     ) -> Result<(Key, Key)> {
-        let salts = (salt_for(cred, salt1), salt_for(cred, salt2));
+        let salts = (*salt1, *salt2);
         let mut assertions =
             self.hmac_secret(cred, AssertionExtension::HmacSecret2(Some(salts)))?;
         let keys = extensions(&assertions).find_map(|e| match e {

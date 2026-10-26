@@ -6,8 +6,9 @@
 //! touch, so the PIN never passes through this process (and
 //! `CARGO_CREDENTIAL_FIDO_PIN` has no effect).
 //!
-//! Windows hashes hmac-secret salts as WebAuthn PRF inputs, so only
-//! credentials with `prf` set can be used here.
+//! By default Windows treats hmac-secret salts as WebAuthn PRF inputs and
+//! hashes them. We set `WEBAUTHN_AUTHENTICATOR_HMAC_SECRET_VALUES_FLAG` to
+//! send them raw, as the HID backend does, so a store works on every OS.
 
 use super::{Authenticator, Credential, Key, RP_ID, new_key, random_bytes};
 use anyhow::{Result, anyhow, bail};
@@ -49,13 +50,6 @@ impl WebAuthnAuthenticator {
         salt1: &[u8; 32],
         salt2: Option<&[u8; 32]>,
     ) -> Result<(Key, Option<Key>)> {
-        if !cred.prf {
-            bail!(
-                "this store's credential was registered by an older version on Linux or \
-                 macOS, with raw hmac-secret salts, which Windows cannot send; register a \
-                 new credential with a new store (set CARGO_CREDENTIAL_FIDO_STORE) and log in again"
-            );
-        }
         let rp_id = wide(RP_ID);
         let client_json = client_data("webauthn.get");
         let client = client_data_ref(&client_json);
@@ -95,6 +89,8 @@ impl WebAuthnAuthenticator {
             WEBAUTHN_USER_VERIFICATION_REQUIREMENT_DISCOURAGED
         };
         opts.pHmacSecretSaltValues = &mut salts;
+        // Send the salts as they are, not hashed as PRF inputs.
+        opts.dwFlags = WEBAUTHN_AUTHENTICATOR_HMAC_SECRET_VALUES_FLAG;
 
         eprintln!("Follow the Windows Security prompt to use your FIDO key.");
         let mut raw = null_mut();
@@ -222,7 +218,6 @@ impl Authenticator for WebAuthnAuthenticator {
         Ok(Credential {
             id: unsafe { slice(a.pbCredentialId, a.cbCredentialId) }.to_vec(),
             uv: user_verified(data)?,
-            prf: true,
         })
     }
 
