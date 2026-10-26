@@ -2,6 +2,12 @@
 name = "cargo-credential-fido"
 version = "1.0.0"
 edition = "2024"
+description = "Cargo credential provider that keeps registry tokens encrypted with a FIDO2 security key"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rustafariandev/cargo-credential-fido"
+readme = "README.md"
+keywords = ["cargo", "credential", "fido2", "security-key", "token"]
+categories = ["command-line-utilities", "development-tools::cargo-plugins", "authentication"]
 
 [dependencies]
 anyhow = "1.0.104"
