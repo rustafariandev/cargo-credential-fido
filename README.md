@@ -11,14 +11,17 @@ that keeps your registry API token encrypted at rest. Only your FIDO2 security k
    `HMAC(credential secret, salt)`, and that output becomes the
    XChaCha20-Poly1305 key that encrypts the token. The registry URL is
    bound in as associated data.
-3. The store (`~/.config/cargo-credential-fido/store.json`, mode 0600) holds
-   only the credential id, salts, nonces and ciphertext. It is useless
-   without the physical key.
+3. The store (`store.json` in `~/.config/cargo-credential-fido/` on Linux,
+   `~/Library/Application Support/cargo-credential-fido/` on macOS, mode
+   0600) holds only the credential id, salts, nonces and ciphertext. It is
+   useless without the physical key.
 4. Decrypting needs a touch on the key, plus the key's PIN if one is set.
    Cargo caches the token for the rest of that one cargo invocation only.
 
 Requirements: a FIDO2 key that supports `hmac-secret` (YubiKey 5, SoloKey,
-Nitrokey 3, Feitian, ...). Exactly one key must be plugged in.
+Nitrokey 3, Feitian, ...). Exactly one key must be plugged in. Supported on
+Linux and macOS. On macOS the process refuses debugger attachment, so it
+cannot be run under `lldb`.
 
 ## Install
 

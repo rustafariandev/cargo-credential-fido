@@ -15,6 +15,7 @@
 
 mod config;
 mod fido;
+mod secure;
 mod store;
 
 use anyhow::{Result, bail};
@@ -22,9 +23,12 @@ use cargo_credential::{
     Action, CacheControl, Credential, CredentialResponse, Error, RegistryInfo, Secret,
 };
 use fido::Authenticator;
-use std::io::{IsTerminal, Read};
+use std::io::{IsTerminal, Read, Write};
 use store::{CredentialRecord, Store};
 use zeroize::Zeroizing;
+
+#[global_allocator]
+static ALLOC: secure::ZeroizingAlloc = secure::ZeroizingAlloc;
 
 /// The index URL cargo reports for crates.io, regardless of protocol.
 const CRATES_IO_INDEX: &str = "https://github.com/rust-lang/crates.io-index";
@@ -48,8 +52,9 @@ impl Credential for FidoCredential {
                 })
             }
             Action::Login(options) => {
-                let token = cargo_credential::read_token(options, registry)?;
-                login(registry.index_url, token.as_deref().expose())?;
+                let token =
+                    Zeroizing::new(cargo_credential::read_token(options, registry)?.expose());
+                login(registry.index_url, &token)?;
                 Ok(CredentialResponse::Login)
             }
             Action::Logout => {
@@ -148,12 +153,22 @@ fn rotate(index_urls: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Longest token accepted on stdin.
+const MAX_TOKEN_LEN: usize = 16 * 1024;
+
 fn read_token_from_stdin() -> Result<Zeroizing<String>> {
     let token = if std::io::stdin().is_terminal() {
         Zeroizing::new(rpassword::prompt_password("Paste your cargo API token: ")?)
     } else {
-        let mut buf = Zeroizing::new(String::new());
-        std::io::stdin().read_to_string(&mut buf)?;
+        // Allocate up front and cap the read so the buffer never reallocates:
+        // a reallocation would free the old copy without zeroing it.
+        let mut buf = Zeroizing::new(String::with_capacity(MAX_TOKEN_LEN + 1));
+        secure::raw_stdin()?
+            .take(MAX_TOKEN_LEN as u64 + 1)
+            .read_to_string(&mut buf)?;
+        if buf.len() > MAX_TOKEN_LEN {
+            bail!("token is longer than {MAX_TOKEN_LEN} bytes");
+        }
         buf
     };
     Ok(Zeroizing::new(token.trim().to_string()))
@@ -176,7 +191,9 @@ fn run(args: &[String]) -> Result<()> {
         Some("login") => login(index_url, &read_token_from_stdin()?),
         Some("get") => match get(index_url)? {
             Some(token) => {
-                println!("{}", token.as_str());
+                let mut out = secure::raw_stdout()?;
+                out.write_all(token.as_bytes())?;
+                out.write_all(b"\n")?;
                 Ok(())
             }
             None => bail!("no token stored for {index_url}"),
@@ -208,6 +225,7 @@ fn run(args: &[String]) -> Result<()> {
 }
 
 fn main() {
+    secure::harden();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--cargo-plugin") {
         cargo_credential::main(FidoCredential);

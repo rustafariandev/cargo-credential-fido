@@ -120,6 +120,7 @@ dependencies = [
  "ctap-hid-fido2",
  "dirs",
  "hex",
+ "libc",
  "rand",
  "rpassword",
  "serde",
