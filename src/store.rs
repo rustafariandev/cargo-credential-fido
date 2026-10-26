@@ -213,6 +213,19 @@ mod tests {
     }
 
     #[test]
+    fn each_seal_gets_a_fresh_salt_and_nonce() {
+        let auth = FakeAuthenticator::new(false);
+        let mut store = sealed(&auth);
+        let cred = store.credential.clone().unwrap();
+        store
+            .seal(&auth, &cred, "sparse+https://other/", TOKEN)
+            .unwrap();
+        let (a, b) = (&store.tokens[URL], &store.tokens["sparse+https://other/"]);
+        assert_ne!(a.salt, b.salt);
+        assert_ne!(a.nonce, b.nonce);
+    }
+
+    #[test]
     fn unseal_unknown_registry_is_none() {
         let auth = FakeAuthenticator::new(false);
         let store = sealed(&auth);
