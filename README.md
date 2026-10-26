@@ -26,8 +26,25 @@ cannot be run under `lldb`.
 ## Install
 
 ```sh
-cargo install --path .
+cargo install cargo-credential-fido
 ```
+
+On Linux, building needs the libudev headers and `pkg-config` (for hidapi):
+
+```sh
+sudo apt install libudev-dev pkg-config     # Debian/Ubuntu
+sudo dnf install systemd-devel pkgconf      # Fedora
+```
+
+On macOS, hidapi uses the system IOKit framework, so only the Xcode Command
+Line Tools are needed (Rust needs them for linking anyway):
+
+```sh
+xcode-select --install
+```
+
+To install from a checkout of this repository instead, run
+`cargo install --path .`.
 
 Then register it with cargo:
 
