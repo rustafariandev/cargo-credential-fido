@@ -29,6 +29,15 @@ later; it says so if Windows is too old). Windows shows its own dialog for
 the PIN and the touch, and `CARGO_CREDENTIAL_FIDO_PIN` has no effect there.
 No admin rights are needed.
 
+On Windows the process also stops other processes of the same user from
+opening it to read its memory (they can still borrow the handle cargo holds on
+it, so this raises the bar rather than closing the door), only loads
+Microsoft-signed DLLs once started, keeps its heap out of Windows Error
+Reporting dumps, and is linked to load its system DLLs from System32 only
+(MSVC builds). Windows has no `mlockall`: to keep secrets out of the page file
+and hibernation file, use BitLocker or
+`fsutil behavior set EncryptPagingFile 1`.
+
 ## Install
 
 ```sh

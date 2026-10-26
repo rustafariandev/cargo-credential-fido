@@ -37,6 +37,9 @@ unsafe impl GlobalAlloc for ZeroizingAlloc {
 /// Keep secrets out of core dumps, debuggers and swap. Best effort: each
 /// step is skipped silently if the OS refuses it.
 pub fn harden() {
+    #[cfg(windows)]
+    windows::harden();
+
     #[cfg(unix)]
     unsafe {
         let no_core = libc::rlimit {
@@ -78,6 +81,92 @@ pub fn harden() {
     #[cfg(target_os = "macos")]
     unsafe {
         libc::ptrace(libc::PT_DENY_ATTACH, 0, std::ptr::null_mut(), 0);
+    }
+}
+
+#[cfg(windows)]
+mod windows {
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetKernelObjectSecurity,
+    };
+    use windows_sys::Win32::System::Diagnostics::Debug::{
+        SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SetErrorMode,
+    };
+    use windows_sys::Win32::System::ErrorReporting::{
+        WER_FAULT_REPORTING_FLAG_NOHEAP, WerSetFlags,
+    };
+    use windows_sys::Win32::System::SystemServices::{
+        PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY, PROCESS_MITIGATION_IMAGE_LOAD_POLICY,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, PROCESS_MITIGATION_POLICY, ProcessImageLoadPolicy,
+        ProcessSignaturePolicy, SetProcessMitigationPolicy,
+    };
+
+    /// The process DACL. SYSTEM keeps full access. The owner (this user) may
+    /// only wait on, query and terminate the process (SYNCHRONIZE |
+    /// PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE). The OWNER
+    /// RIGHTS (`OW`) entry replaces the owner's implicit READ_CONTROL and
+    /// WRITE_DAC, so the user's other processes can neither read our memory,
+    /// inject a thread or attach a debugger, nor rewrite this DACL first.
+    /// Handles opened before this runs, like cargo's handle on its child,
+    /// keep their access.
+    const PROCESS_SDDL: &str = "D:P(A;;GA;;;SY)(A;;0x101001;;;OW)";
+
+    /// `MicrosoftSignedOnly`: only Microsoft-signed DLLs may load from now
+    /// on, which blocks injecting an unsigned DLL.
+    const SIGNATURE_MICROSOFT_ONLY: u32 = 1 << 0;
+    /// `NoRemoteImages | NoLowMandatoryLabelImages | PreferSystem32Images`.
+    const IMAGE_LOAD_SAFE: u32 = 0b111;
+
+    pub fn harden() {
+        unsafe {
+            // No crash dialog, and no heap in Windows Error Reporting dumps.
+            // An administrator's LocalDumps setting still applies.
+            SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+            WerSetFlags(WER_FAULT_REPORTING_FLAG_NOHEAP);
+        }
+        restrict_process_access();
+
+        let mut signature = PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY::default();
+        signature.Anonymous.Flags = SIGNATURE_MICROSOFT_ONLY;
+        set_policy(ProcessSignaturePolicy, &signature);
+        let mut image_load = PROCESS_MITIGATION_IMAGE_LOAD_POLICY::default();
+        image_load.Anonymous.Flags = IMAGE_LOAD_SAFE;
+        set_policy(ProcessImageLoadPolicy, &image_load);
+    }
+
+    fn restrict_process_access() {
+        let sddl: Vec<u16> = PROCESS_SDDL.encode_utf16().chain([0]).collect();
+        let mut descriptor = null_mut();
+        unsafe {
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                null_mut(),
+            ) == 0
+            {
+                return;
+            }
+            SetKernelObjectSecurity(
+                GetCurrentProcess(),
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                descriptor,
+            );
+            LocalFree(descriptor);
+        }
+    }
+
+    fn set_policy<T>(policy: PROCESS_MITIGATION_POLICY, value: &T) {
+        unsafe {
+            SetProcessMitigationPolicy(policy, (value as *const T).cast(), size_of::<T>());
+        }
     }
 }
 
