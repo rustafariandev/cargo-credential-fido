@@ -21,6 +21,9 @@ mod hid;
 #[cfg(windows)]
 mod windows;
 
+#[cfg(test)]
+pub mod fake;
+
 /// Relying-party id the credential is scoped to. It never leaves the machine.
 pub const RP_ID: &str = "cargo-credential-fido";
 

@@ -176,3 +176,108 @@ fn decrypt(key: &[u8; 32], sealed: &SealedToken, index_url: &str) -> Result<Zero
     let token = std::str::from_utf8(&plain).context("stored token is not UTF-8")?;
     Ok(Zeroizing::new(token.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fido::fake::FakeAuthenticator;
+
+    const URL: &str = "https://github.com/rust-lang/crates.io-index";
+    const TOKEN: &str = "cio_secret_token";
+
+    /// A store with `TOKEN` sealed for `URL` by `auth`.
+    fn sealed(auth: &FakeAuthenticator) -> Store {
+        let mut store = Store::default();
+        let cred = auth.enroll().unwrap();
+        store.seal(auth, &cred, URL, TOKEN).unwrap();
+        store.credential = Some(cred);
+        store
+    }
+
+    #[test]
+    fn seal_then_unseal() {
+        for has_pin in [false, true] {
+            let auth = FakeAuthenticator::new(has_pin);
+            let store = sealed(&auth);
+            let token = store.unseal(&auth, URL).unwrap().unwrap();
+            assert_eq!(token.as_str(), TOKEN);
+            assert_eq!(auth.touches.get(), 2);
+        }
+    }
+
+    #[test]
+    fn ciphertext_hides_the_token() {
+        let auth = FakeAuthenticator::new(false);
+        let json = serde_json::to_string(&sealed(&auth)).unwrap();
+        assert!(!json.contains(TOKEN));
+    }
+
+    #[test]
+    fn unseal_unknown_registry_is_none() {
+        let auth = FakeAuthenticator::new(false);
+        let store = sealed(&auth);
+        let touches = auth.touches.get();
+        assert!(
+            store
+                .unseal(&auth, "sparse+https://other/")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(auth.touches.get(), touches, "no touch for a missing token");
+    }
+
+    #[test]
+    fn another_key_cannot_unseal() {
+        let store = sealed(&FakeAuthenticator::new(false));
+        assert!(store.unseal(&FakeAuthenticator::new(false), URL).is_err());
+    }
+
+    #[test]
+    fn pin_mode_must_match() {
+        let auth = FakeAuthenticator::new(true);
+        let mut store = sealed(&auth);
+        store.credential.as_mut().unwrap().uv = false;
+        let err = store.unseal(&auth, URL).unwrap_err();
+        assert!(err.to_string().contains("decryption failed"), "{err}");
+    }
+
+    #[test]
+    fn ciphertext_is_bound_to_its_registry() {
+        let auth = FakeAuthenticator::new(false);
+        let mut store = sealed(&auth);
+        let moved = store.tokens.remove(URL).unwrap();
+        store.tokens.insert("sparse+https://other/".into(), moved);
+        assert!(store.unseal(&auth, "sparse+https://other/").is_err());
+    }
+
+    #[test]
+    fn rotate_uses_one_touch_and_a_new_salt() {
+        let auth = FakeAuthenticator::new(false);
+        let mut store = sealed(&auth);
+        let old_salt = store.tokens[URL].salt;
+        let touches = auth.touches.get();
+
+        store.rotate(&auth, URL).unwrap();
+        assert_eq!(auth.touches.get(), touches + 1);
+        assert_ne!(store.tokens[URL].salt, old_salt);
+        assert_eq!(store.unseal(&auth, URL).unwrap().unwrap().as_str(), TOKEN);
+    }
+
+    #[test]
+    fn failed_rotate_leaves_the_token() {
+        let auth = FakeAuthenticator::new(false);
+        let mut store = sealed(&auth);
+        let old_salt = store.tokens[URL].salt;
+        assert!(store.rotate(&FakeAuthenticator::new(false), URL).is_err());
+        assert_eq!(store.tokens[URL].salt, old_salt);
+        assert_eq!(store.unseal(&auth, URL).unwrap().unwrap().as_str(), TOKEN);
+    }
+
+    #[test]
+    fn store_survives_json() {
+        let auth = FakeAuthenticator::new(true);
+        let json = serde_json::to_vec(&sealed(&auth)).unwrap();
+        let store: Store = serde_json::from_slice(&json).unwrap();
+        assert_eq!(store.unseal(&auth, URL).unwrap().unwrap().as_str(), TOKEN);
+    }
+}
