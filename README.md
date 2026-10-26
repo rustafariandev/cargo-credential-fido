@@ -20,8 +20,14 @@ that keeps your registry API token encrypted at rest. Only your FIDO2 security k
 
 Requirements: a FIDO2 key that supports `hmac-secret` (YubiKey 5, SoloKey,
 Nitrokey 3, Feitian, ...). Exactly one key must be plugged in. Supported on
-Linux and macOS. On macOS the process refuses debugger attachment, so it
-cannot be run under `lldb`.
+Linux, macOS and Windows. On macOS the process refuses debugger attachment, so
+it cannot be run under `lldb`.
+
+On Windows, only elevated processes can talk to a FIDO key directly, so the
+provider goes through the Windows WebAuthn API instead (API version 4 or
+later; it says so if Windows is too old). Windows shows its own dialog for
+the PIN and the touch, and `CARGO_CREDENTIAL_FIDO_PIN` has no effect there.
+No admin rights are needed.
 
 ## Install
 
@@ -124,7 +130,7 @@ token is left in the file; store that one with `login INDEX_URL` instead.
 | Variable | Purpose |
 |---|---|
 | `CARGO_CREDENTIAL_FIDO_STORE` | Use a different store file |
-| `CARGO_CREDENTIAL_FIDO_PIN` | Supply the PIN non-interactively (weakens the PIN factor) |
+| `CARGO_CREDENTIAL_FIDO_PIN` | Supply the PIN non-interactively (weakens the PIN factor). Linux and macOS only |
 
 ## Caveats
 
@@ -134,6 +140,11 @@ token is left in the file; store that one with `login INDEX_URL` instead.
   the key returns a different `hmac-secret` with and without user verification.
   Whether to use a PIN is decided once, at enrollment, from whether the key has
   a PIN set. To change it, delete the store file and run `login` again.
+- Windows hashes `hmac-secret` salts as WebAuthn PRF inputs, so credentials
+  are now registered that way on every platform. A store created by 1.0.x
+  uses raw salts: it keeps working on Linux and macOS, but Windows cannot open
+  it. To use the same key and store on Windows, start a new store and log in
+  again.
 
 ## Tests
 

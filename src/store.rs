@@ -5,7 +5,7 @@
 //! index URL is bound in as associated data, so a ciphertext cannot be moved
 //! to another registry entry.
 
-use crate::fido::{Authenticator, random_bytes};
+use crate::fido::{Authenticator, Credential, random_bytes};
 use anyhow::{Context, Result, anyhow};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
@@ -16,21 +16,15 @@ use std::io::Write;
 use std::path::PathBuf;
 use zeroize::Zeroizing;
 
-const STORE_VERSION: u32 = 1;
+/// Version 2 added `prf` to the credential. Version 1 stores are read as
+/// credentials without it.
+const STORE_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 pub struct Store {
     version: u32,
-    pub credential: Option<CredentialRecord>,
+    pub credential: Option<Credential>,
     pub tokens: BTreeMap<String, SealedToken>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct CredentialRecord {
-    #[serde(with = "hex")]
-    pub id: Vec<u8>,
-    /// Whether the credential was created (and must be used) with a PIN.
-    pub uv: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -66,11 +60,12 @@ impl Store {
         let path = path()?;
         match fs::read(&path) {
             Ok(bytes) => {
-                let store: Store = serde_json::from_slice(&bytes)
+                let mut store: Store = serde_json::from_slice(&bytes)
                     .with_context(|| format!("corrupt store at {}", path.display()))?;
-                if store.version != STORE_VERSION {
+                if !(1..=STORE_VERSION).contains(&store.version) {
                     return Err(anyhow!("unsupported store version {}", store.version));
                 }
+                store.version = STORE_VERSION;
                 Ok(store)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Store::default()),
@@ -103,14 +98,13 @@ impl Store {
 
     pub fn seal(
         &mut self,
-        auth: &Authenticator,
-        cred: &CredentialRecord,
-        pin: Option<&str>,
+        auth: &dyn Authenticator,
+        cred: &Credential,
         index_url: &str,
         token: &str,
     ) -> Result<()> {
         let salt = random_bytes::<32>();
-        let key = auth.derive_key(&cred.id, &salt, pin)?;
+        let key = auth.derive_key(cred, &salt)?;
         let sealed = encrypt(&key, salt, index_url, token)?;
         self.tokens.insert(index_url.to_string(), sealed);
         Ok(())
@@ -119,14 +113,13 @@ impl Store {
     /// Decrypt the token for `index_url`. Returns `Ok(None)` if none is stored.
     pub fn unseal(
         &self,
-        auth: &Authenticator,
-        pin: Option<&str>,
+        auth: &dyn Authenticator,
         index_url: &str,
     ) -> Result<Option<Zeroizing<String>>> {
         let (Some(cred), Some(sealed)) = (&self.credential, self.tokens.get(index_url)) else {
             return Ok(None);
         };
-        let key = auth.derive_key(&cred.id, &sealed.salt, pin)?;
+        let key = auth.derive_key(cred, &sealed.salt)?;
         decrypt(&key, sealed, index_url).map(Some)
     }
 
@@ -134,17 +127,12 @@ impl Store {
     ///
     /// Both the old and the new key come from a single assertion, using the
     /// two-salt form of hmac-secret, so this needs only one touch.
-    pub fn rotate(
-        &mut self,
-        auth: &Authenticator,
-        pin: Option<&str>,
-        index_url: &str,
-    ) -> Result<()> {
+    pub fn rotate(&mut self, auth: &dyn Authenticator, index_url: &str) -> Result<()> {
         let (Some(cred), Some(sealed)) = (&self.credential, self.tokens.get(index_url)) else {
             return Err(anyhow!("no token stored for {index_url}"));
         };
         let new_salt = random_bytes::<32>();
-        let (old_key, new_key) = auth.derive_key_pair(&cred.id, &sealed.salt, &new_salt, pin)?;
+        let (old_key, new_key) = auth.derive_key_pair(cred, &sealed.salt, &new_salt)?;
         let token = decrypt(&old_key, sealed, index_url)?;
         let resealed = encrypt(&new_key, new_salt, index_url, &token)?;
         self.tokens.insert(index_url.to_string(), resealed);

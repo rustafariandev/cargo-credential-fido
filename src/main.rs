@@ -25,7 +25,7 @@ use cargo_credential::{
 };
 use fido::Authenticator;
 use std::io::{IsTerminal, Read, Write};
-use store::{CredentialRecord, Store};
+use store::Store;
 use zeroize::Zeroizing;
 
 #[global_allocator]
@@ -75,16 +75,10 @@ fn login(index_url: &str, token: &str) -> Result<()> {
         bail!("refusing to store an empty token");
     }
     let mut store = Store::load()?;
-    let auth = Authenticator::open()?;
-    let (cred, pin) = unlock(&mut store, &auth)?;
+    let auth = fido::open()?;
+    let cred = unlock(&mut store, auth.as_ref())?;
 
-    store.seal(
-        &auth,
-        &cred,
-        pin.as_deref().map(String::as_str),
-        index_url,
-        token,
-    )?;
+    store.seal(auth.as_ref(), &cred, index_url, token)?;
     store.save()?;
     eprintln!(
         "Token for {index_url} stored in {}",
@@ -93,27 +87,16 @@ fn login(index_url: &str, token: &str) -> Result<()> {
     Ok(())
 }
 
-/// Get the store's credential and its PIN, registering a new credential on
-/// the key first if the store has none.
-fn unlock(
-    store: &mut Store,
-    auth: &Authenticator,
-) -> Result<(CredentialRecord, Option<Zeroizing<String>>)> {
+/// Get the store's credential, registering a new credential on the key
+/// first if the store has none.
+fn unlock(store: &mut Store, auth: &dyn Authenticator) -> Result<fido::Credential> {
     if let Some(cred) = store.credential.clone() {
-        let pin = fido::prompt_pin(cred.uv)?;
-        return Ok((cred, pin));
+        return Ok(cred);
     }
-    // First use: register a credential on the key. Use the PIN if the
-    // key has one, so the token also requires something you know.
-    let uv = auth.has_pin()?;
-    let pin = fido::prompt_pin(uv)?;
-    let cred = CredentialRecord {
-        id: auth.enroll(pin.as_deref().map(String::as_str))?,
-        uv,
-    };
+    let cred = auth.enroll()?;
     store.credential = Some(cred.clone());
     eprintln!("Touch your FIDO key again to encrypt the token.");
-    Ok((cred, pin))
+    Ok(cred)
 }
 
 /// Move the plaintext tokens in cargo's credentials file into the store.
@@ -141,13 +124,12 @@ fn migrate(keep: bool) -> Result<()> {
     }
 
     let mut store = Store::load()?;
-    let auth = Authenticator::open()?;
-    let (cred, pin) = unlock(&mut store, &auth)?;
-    let pin = pin.as_deref().map(String::as_str);
+    let auth = fido::open()?;
+    let cred = unlock(&mut store, auth.as_ref())?;
     for t in &tokens {
         let index_url = t.index_url.as_deref().unwrap_or_default();
         eprintln!("Encrypting the token for {} ({index_url}).", t.label());
-        store.seal(&auth, &cred, pin, index_url, &t.token)?;
+        store.seal(auth.as_ref(), &cred, index_url, &t.token)?;
     }
     // Save before touching the credentials file, so a failure never leaves
     // a token in neither place.
@@ -179,12 +161,11 @@ fn migrate(keep: bool) -> Result<()> {
 
 fn get(index_url: &str) -> Result<Option<Zeroizing<String>>> {
     let store = Store::load()?;
-    let (Some(cred), true) = (&store.credential, store.tokens.contains_key(index_url)) else {
+    if store.credential.is_none() || !store.tokens.contains_key(index_url) {
         return Ok(None);
-    };
-    let auth = Authenticator::open()?;
-    let pin = fido::prompt_pin(cred.uv)?;
-    store.unseal(&auth, pin.as_deref().map(String::as_str), index_url)
+    }
+    let auth = fido::open()?;
+    store.unseal(auth.as_ref(), index_url)
 }
 
 fn logout(index_url: &str) -> Result<bool> {
@@ -199,19 +180,16 @@ fn logout(index_url: &str) -> Result<bool> {
 /// Re-encrypt the tokens for `index_urls` under fresh salts and nonces.
 fn rotate(index_urls: &[String]) -> Result<()> {
     let mut store = Store::load()?;
-    let Some(cred) = store.credential.clone() else {
+    if store.credential.is_none() {
         bail!("no tokens stored");
-    };
+    }
     if let Some(missing) = index_urls.iter().find(|u| !store.tokens.contains_key(*u)) {
         bail!("no token stored for {missing}");
     }
-    let auth = Authenticator::open()?;
-    let pin = fido::prompt_pin(cred.uv)?;
-    let pin = pin.as_deref().map(String::as_str);
-
+    let auth = fido::open()?;
     for url in index_urls {
         eprintln!("Rotating salt for {url}.");
-        store.rotate(&auth, pin, url)?;
+        store.rotate(auth.as_ref(), url)?;
     }
     // Save once at the end: if anything fails, the old entries stay intact.
     store.save()?;

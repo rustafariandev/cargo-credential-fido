@@ -13,15 +13,27 @@ categories = ["command-line-utilities", "development-tools::cargo-plugins", "aut
 anyhow = "1.0.104"
 cargo-credential = "0.4.11"
 chacha20poly1305 = "0.10"
-ctap-hid-fido2 = "3.6.0"
 dirs = "7.0.0"
 hex = { version = "0.4.3", features = ["serde"] }
 rand = "0.8"
 rpassword = "7.5.4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.10"
 toml_edit = "0.25"
 zeroize = "1.9.1"
 
 [target."cfg(unix)".dependencies]
 libc = "0.2"
+
+# Windows only lets elevated processes open FIDO keys over HID, so it uses
+# the system WebAuthn API instead.
+[target."cfg(not(windows))".dependencies]
+ctap-hid-fido2 = "3.6.0"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WindowsWebServices",
+    "Win32_UI_WindowsAndMessaging",
+] }
