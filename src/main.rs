@@ -135,6 +135,10 @@ fn migrate(keep: bool) -> Result<()> {
     if tokens.is_empty() {
         bail!("no tokens to migrate in {}", creds.path().display());
     }
+    // Check before opening the key, so no touches are wasted.
+    if let Some(t) = tokens.iter().find(|t| t.token.trim().is_empty()) {
+        bail!("the token for {} is empty", t.label());
+    }
 
     let mut store = Store::load()?;
     let auth = Authenticator::open()?;
@@ -142,9 +146,6 @@ fn migrate(keep: bool) -> Result<()> {
     let pin = pin.as_deref().map(String::as_str);
     for t in &tokens {
         let index_url = t.index_url.as_deref().unwrap_or_default();
-        if t.token.trim().is_empty() {
-            bail!("the token for {} is empty", t.label());
-        }
         eprintln!("Encrypting the token for {} ({index_url}).", t.label());
         store.seal(&auth, &cred, pin, index_url, &t.token)?;
     }
@@ -218,6 +219,43 @@ fn rotate(index_urls: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// The index URL cargo reports for a registry the user typed as `url`.
+/// crates.io always appears under its git index URL, whichever protocol is
+/// used, and cargo requires sparse index URLs to end in `/`.
+fn normalize_index_url(url: &str) -> String {
+    let bare = url.trim_end_matches('/');
+    let bare = bare.strip_suffix(".git").unwrap_or(bare);
+    let crates_io = [
+        CRATES_IO_INDEX,
+        "sparse+https://index.crates.io",
+        "https://index.crates.io",
+    ];
+    if crates_io.contains(&bare) {
+        return CRATES_IO_INDEX.to_string();
+    }
+    if url.starts_with("sparse+") && !url.ends_with('/') {
+        return format!("{url}/");
+    }
+    url.to_string()
+}
+
+/// The stored index URL that `url` refers to: `url` itself, or a stored URL
+/// that differs from it only by a trailing `/`.
+fn resolve_stored(store: &Store, url: String) -> String {
+    if store.tokens.contains_key(&url) {
+        return url;
+    }
+    let bare = url.trim_end_matches('/');
+    let mut matches = store
+        .tokens
+        .keys()
+        .filter(|k| k.trim_end_matches('/') == bare);
+    match (matches.next(), matches.next()) {
+        (Some(only), None) => only.clone(),
+        _ => url,
+    }
+}
+
 /// Longest token accepted on stdin.
 const MAX_TOKEN_LEN: usize = 16 * 1024;
 
@@ -252,8 +290,15 @@ fn usage() -> ! {
 }
 
 fn run(args: &[String]) -> Result<()> {
-    let index_url = args.get(1).map(String::as_str).unwrap_or(CRATES_IO_INDEX);
-    match args.first().map(String::as_str) {
+    let index_url = normalize_index_url(args.get(1).map(String::as_str).unwrap_or(CRATES_IO_INDEX));
+    let command = args.first().map(String::as_str);
+    let index_url = if matches!(command, Some("get" | "logout" | "rotate")) {
+        resolve_stored(&Store::load()?, index_url)
+    } else {
+        index_url
+    };
+    let index_url = index_url.as_str();
+    match command {
         Some("login") => login(index_url, &read_token_from_stdin()?),
         Some("get") => match get(index_url)? {
             Some(token) => {
@@ -305,5 +350,41 @@ fn main() {
     if let Err(e) = run(&args) {
         eprintln!("error: {e:#}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crates_io_aliases_normalize_to_the_git_index() {
+        for url in [
+            CRATES_IO_INDEX,
+            "https://github.com/rust-lang/crates.io-index/",
+            "https://github.com/rust-lang/crates.io-index.git",
+            "sparse+https://index.crates.io/",
+            "sparse+https://index.crates.io",
+        ] {
+            assert_eq!(normalize_index_url(url), CRATES_IO_INDEX, "{url}");
+        }
+    }
+
+    #[test]
+    fn sparse_urls_get_a_trailing_slash() {
+        assert_eq!(
+            normalize_index_url("sparse+https://alt.example/index"),
+            "sparse+https://alt.example/index/"
+        );
+        assert_eq!(
+            normalize_index_url("sparse+https://alt.example/index/"),
+            "sparse+https://alt.example/index/"
+        );
+    }
+
+    #[test]
+    fn other_urls_are_kept() {
+        let url = "https://git.example/index/";
+        assert_eq!(normalize_index_url(url), url);
     }
 }

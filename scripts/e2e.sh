@@ -126,6 +126,8 @@ expect_eq "$(cargo-credential-fido get)" tok-crates "crates.io token"
 printf 'tok-alt' | cargo-credential-fido login "$alt"
 expect_eq "$(cargo-credential-fido get "$alt")" tok-alt "alt registry token"
 expect_eq "$(cargo-credential-fido list | sort | xargs)" "$crates_io $alt" "list"
+expect_eq "$(cargo-credential-fido get sparse+https://index.crates.io/)" tok-crates "crates.io via its sparse URL"
+expect_eq "$(cargo-credential-fido get "${alt%/}")" tok-alt "alt registry without the trailing slash"
 expect_eq "$(stat -c %a "$CARGO_CREDENTIAL_FIDO_STORE")" 600 "store file mode"
 grep -q '"uv": *false' "$CARGO_CREDENTIAL_FIDO_STORE" || fail "store should not require a PIN"
 ! grep -q tok- "$CARGO_CREDENTIAL_FIDO_STORE" || fail "plaintext token in the store"
@@ -170,6 +172,16 @@ expect_eq "$(cargo-credential-fido list)" "$crates_io" "list after logout"
 
 step "configure"
 mkdir -p "$CARGO_HOME"
+rm -f "$CARGO_HOME/config.toml"
+cargo-credential-fido configure
+grep -q 'global-credential-providers = \["cargo:token", "cargo-credential-fido"\]' "$CARGO_HOME/config.toml" ||
+    fail "configure without providers should keep cargo:token: $(cat "$CARGO_HOME/config.toml")"
+printf '[registry]\nglobal-credential-providers = ["cargo:token"]\n' >"$work/linked.toml"
+ln -sf "$work/linked.toml" "$CARGO_HOME/config.toml"
+cargo-credential-fido configure
+[[ -L $CARGO_HOME/config.toml ]] || fail "configure replaced a symlinked config"
+grep -q cargo-credential-fido "$work/linked.toml" || fail "configure did not write through the symlink"
+rm "$CARGO_HOME/config.toml"
 printf '# keep me\n[registry]\nglobal-credential-providers = ["cargo:token"]\n' >"$CARGO_HOME/config.toml"
 cargo-credential-fido configure
 cargo-credential-fido configure
@@ -212,6 +224,22 @@ expect_eq "$(cargo-credential-fido get "$alt")" tok-plain-foo "migrated foo toke
     fail "migrate left plaintext tokens: $(cat "$CARGO_HOME/credentials.toml")"
 grep -q tok-plain-bar "$CARGO_HOME/credentials.toml" || fail "migrate removed the unresolvable bar token"
 grep -q '# credentials' "$CARGO_HOME/credentials.toml" || fail "migrate dropped a comment"
+
+step "migrate edge cases"
+chmod 600 "$CARGO_HOME/credentials.toml"
+printf '[registry]\ntoken = "tok-plain-crates"\n' >>"$CARGO_HOME/credentials.toml"
+cargo-credential-fido migrate
+expect_eq "$(stat -c %a "$CARGO_HOME/credentials.toml")" 600 "credentials file mode after migrate"
+rm "$CARGO_CREDENTIAL_FIDO_STORE"
+printf '[registry]\ntoken = ""\n' >"$CARGO_HOME/credentials.toml"
+expect_fail "migrate an empty token" cargo-credential-fido migrate
+[[ ! -e $CARGO_CREDENTIAL_FIDO_STORE ]] || fail "migrate of an empty token created a store"
+# Cargo reads the legacy extensionless file when both exist.
+printf '[registry]\ntoken = "tok-legacy"\n' >"$CARGO_HOME/credentials"
+cargo-credential-fido migrate
+expect_eq "$(cargo-credential-fido get)" tok-legacy "token migrated from the legacy credentials file"
+! grep -q tok-legacy "$CARGO_HOME/credentials" || fail "migrate left the legacy token"
+rm "$CARGO_HOME/credentials" "$CARGO_HOME/credentials.toml"
 
 echo "== new key, with a PIN set after enrolling"
 stop_key

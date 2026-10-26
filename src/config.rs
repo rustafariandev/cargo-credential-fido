@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use toml_edit::{Array, DocumentMut, Table, TableLike};
 use zeroize::Zeroizing;
@@ -20,16 +21,16 @@ fn cargo_home() -> Result<PathBuf> {
     Ok(home.join(".cargo"))
 }
 
-/// The file cargo reads for `name`: `name.toml`, or the legacy
-/// extensionless `name` if only that one exists.
+/// The file cargo reads for `name`: the legacy extensionless `name` if it
+/// exists, otherwise `name.toml`. Cargo prefers the legacy file even when
+/// both exist.
 fn cargo_file(name: &str) -> Result<PathBuf> {
     let home = cargo_home()?;
-    let path = home.join(format!("{name}.toml"));
     let legacy = home.join(name);
-    if !path.exists() && legacy.exists() {
+    if legacy.is_file() {
         return Ok(legacy);
     }
-    Ok(path)
+    Ok(home.join(format!("{name}.toml")))
 }
 
 /// Parse a TOML file, or return `None` if it does not exist.
@@ -67,9 +68,11 @@ pub fn configure() -> Result<()> {
         .or_insert(toml_edit::table())
         .as_table_like_mut()
         .ok_or_else(|| anyhow!("`registry` in {} is not a table", path.display()))?;
+    // When the key is unset cargo uses `["cargo:token"]`. Keep that as a
+    // fallback, so tokens still in the credentials file keep working.
     let providers = registry
         .entry("global-credential-providers")
-        .or_insert(toml_edit::value(Array::new()))
+        .or_insert(toml_edit::value(Array::from_iter(["cargo:token"])))
         .as_array_mut()
         .ok_or_else(|| {
             anyhow!(
@@ -94,8 +97,7 @@ pub fn configure() -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow!("invalid config path"))?;
     fs::create_dir_all(dir)?;
-    fs::write(&path, doc.to_string())
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    write_atomic(&path, doc.to_string().as_bytes())?;
 
     eprintln!(
         "Added {PROVIDER} to registry.global-credential-providers in {}",
@@ -194,10 +196,50 @@ impl Credentials {
     }
 
     pub fn save(&self) -> Result<()> {
-        // Writing in place keeps the file's existing permissions.
-        fs::write(&self.path, Zeroizing::new(self.doc.to_string()).as_bytes())
-            .with_context(|| format!("failed to write {}", self.path.display()))
+        write_atomic(&self.path, Zeroizing::new(self.doc.to_string()).as_bytes())
     }
+}
+
+/// Replace `path` with `contents` through a temporary file and a rename, so
+/// an interrupted write never leaves it truncated. The file keeps its
+/// permissions (new files get 0600), and a symlink is followed rather than
+/// replaced.
+fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
+    let existing = fs::metadata(path).ok();
+    let path = match existing {
+        Some(_) => fs::canonicalize(path)
+            .with_context(|| format!("failed to resolve {}", path.display()))?,
+        None => path.to_path_buf(),
+    };
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    let tmp = path.with_file_name(name);
+
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let write = || -> std::io::Result<()> {
+        // A stale temporary file would keep its old permissions.
+        match fs::remove_file(&tmp) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        let mut file = opts.open(&tmp)?;
+        if let Some(meta) = &existing {
+            file.set_permissions(meta.permissions())?;
+        }
+        file.write_all(contents)?;
+        file.sync_all()?;
+        fs::rename(&tmp, &path)
+    };
+    write().map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        anyhow::Error::new(e).context(format!("failed to write {}", path.display()))
+    })
 }
 
 fn token_in(table: Option<&dyn TableLike>) -> Option<Zeroizing<String>> {

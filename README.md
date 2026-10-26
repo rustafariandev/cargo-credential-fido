@@ -55,12 +55,14 @@ cargo-credential-fido configure
 This adds the provider to `registry.global-credential-providers` in
 `$CARGO_HOME/config.toml` (default `~/.cargo/config.toml`). Comments and
 formatting in the file are kept. If other providers are already listed, they
-stay as fallbacks; remove `cargo:token` if you never want plaintext tokens.
-Doing it by hand is the same as adding:
+stay as fallbacks. If none are, `cargo:token` (cargo's default) is kept as a
+fallback, so tokens still in `credentials.toml` keep working; remove it once
+they are migrated if you never want plaintext tokens. Doing it by hand is the
+same as adding:
 
 ```toml
 [registry]
-global-credential-providers = ["cargo-credential-fido"]
+global-credential-providers = ["cargo:token", "cargo-credential-fido"]
 ```
 
 ## Use
@@ -84,7 +86,9 @@ cargo-credential-fido migrate [--keep]          # import tokens from credentials
 ```
 
 `INDEX_URL` defaults to crates.io (`https://github.com/rust-lang/crates.io-index`).
-For other registries, use the index URL cargo reports, e.g. `sparse+https://...`.
+Any crates.io index URL, such as `sparse+https://index.crates.io/`, means the
+same. For other registries, use the index URL cargo reports, e.g.
+`sparse+https://...`; a missing trailing `/` is added to sparse URLs.
 
 ## Rotating the salt
 
