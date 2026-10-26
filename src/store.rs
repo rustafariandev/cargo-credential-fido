@@ -110,25 +110,9 @@ impl Store {
         token: &str,
     ) -> Result<()> {
         let salt = random_bytes::<32>();
-        let nonce = random_bytes::<24>();
         let key = auth.derive_key(&cred.id, &salt, pin)?;
-        let ciphertext = cipher(&key)
-            .encrypt(
-                XNonce::from_slice(&nonce),
-                Payload {
-                    msg: token.as_bytes(),
-                    aad: index_url.as_bytes(),
-                },
-            )
-            .map_err(|_| anyhow!("encryption failed"))?;
-        self.tokens.insert(
-            index_url.to_string(),
-            SealedToken {
-                salt,
-                nonce,
-                ciphertext,
-            },
-        );
+        let sealed = encrypt(&key, salt, index_url, token)?;
+        self.tokens.insert(index_url.to_string(), sealed);
         Ok(())
     }
 
@@ -143,24 +127,67 @@ impl Store {
             return Ok(None);
         };
         let key = auth.derive_key(&cred.id, &sealed.salt, pin)?;
-        let plain = Zeroizing::new(
-            cipher(&key)
-                .decrypt(
-                    XNonce::from_slice(&sealed.nonce),
-                    Payload {
-                        msg: &sealed.ciphertext,
-                        aad: index_url.as_bytes(),
-                    },
-                )
-                .map_err(|_| {
-                    anyhow!("decryption failed: this token was sealed by a different FIDO key")
-                })?,
-        );
-        let token = std::str::from_utf8(&plain).context("stored token is not UTF-8")?;
-        Ok(Some(Zeroizing::new(token.to_string())))
+        decrypt(&key, sealed, index_url).map(Some)
+    }
+
+    /// Re-encrypt the token for `index_url` under a fresh salt and nonce.
+    ///
+    /// Both the old and the new key come from a single assertion, using the
+    /// two-salt form of hmac-secret, so this needs only one touch.
+    pub fn rotate(
+        &mut self,
+        auth: &Authenticator,
+        pin: Option<&str>,
+        index_url: &str,
+    ) -> Result<()> {
+        let (Some(cred), Some(sealed)) = (&self.credential, self.tokens.get(index_url)) else {
+            return Err(anyhow!("no token stored for {index_url}"));
+        };
+        let new_salt = random_bytes::<32>();
+        let (old_key, new_key) = auth.derive_key_pair(&cred.id, &sealed.salt, &new_salt, pin)?;
+        let token = decrypt(&old_key, sealed, index_url)?;
+        let resealed = encrypt(&new_key, new_salt, index_url, &token)?;
+        self.tokens.insert(index_url.to_string(), resealed);
+        Ok(())
     }
 }
 
 fn cipher(key: &[u8; 32]) -> XChaCha20Poly1305 {
     XChaCha20Poly1305::new(key.into())
+}
+
+fn encrypt(key: &[u8; 32], salt: [u8; 32], index_url: &str, token: &str) -> Result<SealedToken> {
+    let nonce = random_bytes::<24>();
+    let ciphertext = cipher(key)
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: token.as_bytes(),
+                aad: index_url.as_bytes(),
+            },
+        )
+        .map_err(|_| anyhow!("encryption failed"))?;
+    Ok(SealedToken {
+        salt,
+        nonce,
+        ciphertext,
+    })
+}
+
+fn decrypt(key: &[u8; 32], sealed: &SealedToken, index_url: &str) -> Result<Zeroizing<String>> {
+    let plain = Zeroizing::new(
+        cipher(key)
+            .decrypt(
+                XNonce::from_slice(&sealed.nonce),
+                Payload {
+                    msg: &sealed.ciphertext,
+                    aad: index_url.as_bytes(),
+                },
+            )
+            .map_err(|_| {
+                anyhow!("decryption failed: this token was sealed by a different FIDO key")
+            })?,
+    );
+    let token = std::str::from_utf8(&plain).context("stored token is not UTF-8")?;
+    Ok(Zeroizing::new(token.to_string()))
 }

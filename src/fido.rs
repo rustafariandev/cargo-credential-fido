@@ -18,6 +18,9 @@ use zeroize::Zeroizing;
 /// Relying-party id the credential is scoped to. It never leaves the machine.
 pub const RP_ID: &str = "cargo-credential-fido";
 
+/// A 32-byte hmac-secret output, used directly as an encryption key.
+pub type Key = Zeroizing<[u8; 32]>;
+
 pub struct Authenticator {
     device: FidoKeyHid,
 }
@@ -79,11 +82,56 @@ impl Authenticator {
         credential_id: &[u8],
         salt: &[u8; 32],
         pin: Option<&str>,
-    ) -> Result<Zeroizing<[u8; 32]>> {
+    ) -> Result<Key> {
+        self.hmac_secret(
+            credential_id,
+            AssertionExtension::HmacSecret(Some(*salt)),
+            pin,
+        )?
+        .into_iter()
+        .find_map(|e| match e {
+            AssertionExtension::HmacSecret(Some(secret)) => Some(Zeroizing::new(secret)),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow!("FIDO key did not return an hmac-secret"))
+    }
+
+    /// Derive the secrets for two salts at once, with a single touch.
+    ///
+    /// This is the two-salt form of hmac-secret, meant for key rotation:
+    /// `salt1` gives the current key and `salt2` the next one.
+    pub fn derive_key_pair(
+        &self,
+        credential_id: &[u8],
+        salt1: &[u8; 32],
+        salt2: &[u8; 32],
+        pin: Option<&str>,
+    ) -> Result<(Key, Key)> {
+        let ext = AssertionExtension::HmacSecret2(Some((*salt1, *salt2)));
+        self.hmac_secret(credential_id, ext, pin)?
+            .into_iter()
+            .find_map(|e| match e {
+                AssertionExtension::HmacSecret2(Some((a, b))) => {
+                    Some((Zeroizing::new(a), Zeroizing::new(b)))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| anyhow!("FIDO key did not return both hmac-secret outputs"))
+    }
+
+    /// Run one assertion with the given hmac-secret request and return the
+    /// extension outputs.
+    fn hmac_secret(
+        &self,
+        credential_id: &[u8],
+        ext: AssertionExtension,
+        pin: Option<&str>,
+    ) -> Result<Vec<AssertionExtension>> {
         let challenge = random_bytes::<32>();
+        let extensions = [ext];
         let builder = GetAssertionArgsBuilder::new(RP_ID, &challenge)
             .credential_id(credential_id)
-            .extensions(&[AssertionExtension::HmacSecret(Some(*salt))]);
+            .extensions(&extensions);
         let builder = match pin {
             Some(pin) => builder.pin(pin),
             None => builder.without_pin_and_uv(),
@@ -93,15 +141,7 @@ impl Authenticator {
             .device
             .get_assertion_with_args(&builder.build())
             .context("FIDO key assertion failed (wrong key or wrong PIN?)")?;
-
-        assertions
-            .into_iter()
-            .flat_map(|a| a.extensions)
-            .find_map(|e| match e {
-                AssertionExtension::HmacSecret(Some(secret)) => Some(Zeroizing::new(secret)),
-                _ => None,
-            })
-            .ok_or_else(|| anyhow!("FIDO key did not return an hmac-secret"))
+        Ok(assertions.into_iter().flat_map(|a| a.extensions).collect())
     }
 }
 

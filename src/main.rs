@@ -17,7 +17,7 @@ mod config;
 mod fido;
 mod store;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use cargo_credential::{
     Action, CacheControl, Credential, CredentialResponse, Error, RegistryInfo, Secret,
 };
@@ -139,11 +139,8 @@ fn rotate(index_urls: &[String]) -> Result<()> {
     let pin = pin.as_deref().map(String::as_str);
 
     for url in index_urls {
-        eprintln!("Rotating salt for {url} (touch the key twice: decrypt, then encrypt).");
-        let token = store
-            .unseal(&auth, pin, url)?
-            .ok_or_else(|| anyhow!("no token stored for {url}"))?;
-        store.seal(&auth, &cred, pin, url, &token)?;
+        eprintln!("Rotating salt for {url}.");
+        store.rotate(&auth, pin, url)?;
     }
     // Save once at the end: if anything fails, the old entries stay intact.
     store.save()?;

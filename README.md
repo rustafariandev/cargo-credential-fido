@@ -69,8 +69,9 @@ For other registries, use the index URL cargo reports, e.g. `sparse+https://...`
 
 `rotate` decrypts a token and encrypts it again under a fresh random salt and
 nonce, so a copy of the old store file can no longer be matched to the
-current one. It needs two touches per token, one to decrypt and one to
-encrypt. The token itself and the credential on the key stay the same, so
+current one. It uses the two-salt form of `hmac-secret`: one assertion
+returns both the old and the new key, so each token needs a single touch.
+The token itself and the credential on the key stay the same, so
 this does not replace revoking a leaked token. The store is written only
 after every token is rotated, so a failure leaves it unchanged.
 
