@@ -12,6 +12,7 @@
 //!     cargo-credential-fido list                 # list registries with a token
 //!     cargo-credential-fido rotate [INDEX_URL|--all]  # re-encrypt under a new salt
 //!     cargo-credential-fido configure            # add this provider to cargo's config
+//!     cargo-credential-fido migrate [--keep]     # move tokens out of credentials.toml
 
 mod config;
 mod fido;
@@ -75,26 +76,7 @@ fn login(index_url: &str, token: &str) -> Result<()> {
     }
     let mut store = Store::load()?;
     let auth = Authenticator::open()?;
-
-    let (cred, pin) = match store.credential.clone() {
-        Some(cred) => {
-            let pin = fido::prompt_pin(cred.uv)?;
-            (cred, pin)
-        }
-        None => {
-            // First use: register a credential on the key. Use the PIN if the
-            // key has one, so the token also requires something you know.
-            let uv = auth.has_pin()?;
-            let pin = fido::prompt_pin(uv)?;
-            let cred = CredentialRecord {
-                id: auth.enroll(pin.as_deref().map(String::as_str))?,
-                uv,
-            };
-            store.credential = Some(cred.clone());
-            eprintln!("Touch your FIDO key again to encrypt the token.");
-            (cred, pin)
-        }
-    };
+    let (cred, pin) = unlock(&mut store, &auth)?;
 
     store.seal(
         &auth,
@@ -108,6 +90,89 @@ fn login(index_url: &str, token: &str) -> Result<()> {
         "Token for {index_url} stored in {}",
         store::path()?.display()
     );
+    Ok(())
+}
+
+/// Get the store's credential and its PIN, registering a new credential on
+/// the key first if the store has none.
+fn unlock(
+    store: &mut Store,
+    auth: &Authenticator,
+) -> Result<(CredentialRecord, Option<Zeroizing<String>>)> {
+    if let Some(cred) = store.credential.clone() {
+        let pin = fido::prompt_pin(cred.uv)?;
+        return Ok((cred, pin));
+    }
+    // First use: register a credential on the key. Use the PIN if the
+    // key has one, so the token also requires something you know.
+    let uv = auth.has_pin()?;
+    let pin = fido::prompt_pin(uv)?;
+    let cred = CredentialRecord {
+        id: auth.enroll(pin.as_deref().map(String::as_str))?,
+        uv,
+    };
+    store.credential = Some(cred.clone());
+    eprintln!("Touch your FIDO key again to encrypt the token.");
+    Ok((cred, pin))
+}
+
+/// Move the plaintext tokens in cargo's credentials file into the store.
+/// Unless `keep` is set, they are then removed from the credentials file.
+fn migrate(keep: bool) -> Result<()> {
+    let Some(mut creds) = config::Credentials::load()? else {
+        bail!("no cargo credentials file found");
+    };
+    let (tokens, unknown): (Vec<_>, Vec<_>) = creds
+        .tokens(CRATES_IO_INDEX)?
+        .into_iter()
+        .partition(|t| t.index_url.is_some());
+    for t in &unknown {
+        eprintln!(
+            "Skipping registry `{}`: no index URL for it in cargo's config.",
+            t.label()
+        );
+    }
+    if tokens.is_empty() {
+        bail!("no tokens to migrate in {}", creds.path().display());
+    }
+
+    let mut store = Store::load()?;
+    let auth = Authenticator::open()?;
+    let (cred, pin) = unlock(&mut store, &auth)?;
+    let pin = pin.as_deref().map(String::as_str);
+    for t in &tokens {
+        let index_url = t.index_url.as_deref().unwrap_or_default();
+        if t.token.trim().is_empty() {
+            bail!("the token for {} is empty", t.label());
+        }
+        eprintln!("Encrypting the token for {} ({index_url}).", t.label());
+        store.seal(&auth, &cred, pin, index_url, &t.token)?;
+    }
+    // Save before touching the credentials file, so a failure never leaves
+    // a token in neither place.
+    store.save()?;
+    eprintln!(
+        "Stored {} token(s) in {}",
+        tokens.len(),
+        store::path()?.display()
+    );
+
+    if keep {
+        eprintln!("Plaintext tokens left in {}", creds.path().display());
+    } else {
+        for t in &tokens {
+            creds.remove(t.name.as_deref());
+        }
+        creds.save()?;
+        eprintln!(
+            "Removed {} plaintext token(s) from {}",
+            tokens.len(),
+            creds.path().display()
+        );
+    }
+    if !config::is_configured()? {
+        eprintln!("Run `cargo-credential-fido configure` so cargo uses the stored tokens.");
+    }
     Ok(())
 }
 
@@ -179,7 +244,8 @@ fn usage() -> ! {
         "usage: cargo-credential-fido <login|get|logout> [INDEX_URL]\n       \
          cargo-credential-fido rotate [INDEX_URL|--all]\n       \
          cargo-credential-fido list\n       \
-         cargo-credential-fido configure\n\n\
+         cargo-credential-fido configure\n       \
+         cargo-credential-fido migrate [--keep]\n\n\
          INDEX_URL defaults to {CRATES_IO_INDEX} (crates.io)."
     );
     std::process::exit(2);
@@ -214,6 +280,11 @@ fn run(args: &[String]) -> Result<()> {
             rotate(&urls)
         }
         Some("configure") => config::configure(),
+        Some("migrate") => match args.get(1).map(String::as_str) {
+            None => migrate(false),
+            Some("--keep") => migrate(true),
+            Some(_) => usage(),
+        },
         Some("list") => {
             for url in Store::load()?.tokens.keys() {
                 println!("{url}");

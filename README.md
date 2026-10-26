@@ -63,6 +63,7 @@ cargo-credential-fido logout [INDEX_URL]
 cargo-credential-fido list
 cargo-credential-fido rotate [INDEX_URL|--all]  # re-encrypt under a new salt
 cargo-credential-fido configure                 # register with cargo
+cargo-credential-fido migrate [--keep]          # import tokens from credentials.toml
 ```
 
 `INDEX_URL` defaults to crates.io (`https://github.com/rust-lang/crates.io-index`).
@@ -80,9 +81,22 @@ after every token is rotated, so a failure leaves it unchanged.
 
 ## Migrating from a plaintext token
 
-If `~/.cargo/credentials.toml` already contains a token, run `cargo login`
-once with this provider configured. Then delete the token from
-`credentials.toml`.
+If `$CARGO_HOME/credentials.toml` already contains tokens, run:
+
+```sh
+cargo-credential-fido migrate
+```
+
+This encrypts every token in the file: the crates.io one under `[registry]`
+and the ones under `[registries.NAME]`. It needs one touch per token. Then it
+removes them from `credentials.toml`, keeping the rest of the file. The store
+is saved before `credentials.toml` is changed, so a failure never loses a
+token. Pass `--keep` to leave the plaintext tokens in place.
+
+To find the index URL of an alternative registry, `migrate` looks at
+`registries.NAME.index` in `$CARGO_HOME/config.toml`, or at
+`CARGO_REGISTRIES_NAME_INDEX`. A registry it cannot resolve is skipped and its
+token is left in the file; store that one with `login INDEX_URL` instead.
 
 ## Environment
 
