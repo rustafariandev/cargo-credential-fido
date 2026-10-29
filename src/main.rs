@@ -111,29 +111,29 @@ fn migrate(keep: bool) -> Result<()> {
     let Some(mut creds) = config::Credentials::load()? else {
         bail!("no cargo credentials file found");
     };
-    let (tokens, unknown): (Vec<_>, Vec<_>) = creds
-        .tokens(CRATES_IO_INDEX)?
-        .into_iter()
-        .partition(|t| t.index_url.is_some());
-    for t in &unknown {
-        eprintln!(
-            "Skipping registry `{}`: no index URL for it in cargo's config.",
-            t.label()
-        );
+    // Each token with its index URL.
+    let mut tokens = Vec::new();
+    for t in creds.tokens(CRATES_IO_INDEX)? {
+        match t.index_url.clone() {
+            Some(index_url) => tokens.push((index_url, t)),
+            None => eprintln!(
+                "Skipping registry `{}`: no index URL for it in cargo's config.",
+                t.label()
+            ),
+        }
     }
     if tokens.is_empty() {
         bail!("no tokens to migrate in {}", creds.path().display());
     }
     // Check before opening the key, so no touches are wasted.
-    if let Some(t) = tokens.iter().find(|t| t.token.trim().is_empty()) {
+    if let Some((_, t)) = tokens.iter().find(|(_, t)| t.token.trim().is_empty()) {
         bail!("the token for {} is empty", t.label());
     }
 
     let mut store = Store::load()?;
     let auth = fido::open()?;
     let cred = unlock(&mut store, auth.as_ref())?;
-    for (i, t) in tokens.iter().enumerate() {
-        let index_url = t.index_url.as_deref().unwrap_or_default();
+    for (i, (index_url, t)) in tokens.iter().enumerate() {
         eprintln!(
             "Encrypting the token for {} ({index_url}), {} of {}.",
             t.label(),
@@ -156,7 +156,7 @@ fn migrate(keep: bool) -> Result<()> {
     if keep {
         eprintln!("Plaintext tokens left in {}", creds.path().display());
     } else {
-        for t in &tokens {
+        for (_, t) in &tokens {
             creds.remove(t.name.as_deref());
         }
         creds.save()?;

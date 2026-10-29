@@ -211,7 +211,10 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
             .with_context(|| format!("failed to resolve {}", path.display()))?,
         None => path.to_path_buf(),
     };
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    let mut name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("{} is not a file path", path.display()))?
+        .to_os_string();
     name.push(".tmp");
     let tmp = path.with_file_name(name);
 
