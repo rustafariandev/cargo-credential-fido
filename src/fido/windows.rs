@@ -27,7 +27,9 @@ use windows_sys::Win32::System::Console::GetConsoleWindow;
 use windows_sys::Win32::System::LibraryLoader::{
     GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GA_ROOTOWNER, GetAncestor, GetForegroundWindow, IsWindowVisible,
+};
 use windows_sys::core::{BOOL, HRESULT, PCWSTR};
 use zeroize::Zeroize;
 
@@ -394,14 +396,22 @@ fn len32(bytes: &[u8]) -> u32 {
     u32::try_from(bytes.len()).expect("WebAuthn buffers are small")
 }
 
-/// The window the Windows Security dialog belongs to: the console cargo
-/// runs in, so the dialog stays with the terminal even if the user has
-/// switched to another window. Without a console, the foreground window.
+/// The window the Windows Security dialog belongs to: the terminal cargo
+/// runs in, so the dialog stays with it even if the user has switched to
+/// another window. Under ConPTY (Windows Terminal, VS Code) the console
+/// window is a hidden pseudo-window, owned by the terminal's window in
+/// recent versions, so we take its root owner. If that is still hidden, or
+/// there is no console, the foreground window, which is usually the one the
+/// user started cargo from.
 fn parent_window() -> HWND {
-    let console = unsafe { GetConsoleWindow() };
-    if console.is_null() {
-        unsafe { GetForegroundWindow() }
-    } else {
-        console
+    unsafe {
+        let console = GetConsoleWindow();
+        if !console.is_null() {
+            let owner = GetAncestor(console, GA_ROOTOWNER);
+            if !owner.is_null() && IsWindowVisible(owner) != 0 {
+                return owner;
+            }
+        }
+        GetForegroundWindow()
     }
 }

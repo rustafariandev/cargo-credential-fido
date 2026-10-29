@@ -108,12 +108,10 @@ mod windows {
     use windows_sys::Win32::System::ErrorReporting::{
         WER_FAULT_REPORTING_FLAG_NOHEAP, WerSetFlags,
     };
-    use windows_sys::Win32::System::SystemServices::{
-        PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY, PROCESS_MITIGATION_IMAGE_LOAD_POLICY,
-    };
+    use windows_sys::Win32::System::SystemServices::PROCESS_MITIGATION_IMAGE_LOAD_POLICY;
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, OpenProcessToken, PROCESS_MITIGATION_POLICY, ProcessImageLoadPolicy,
-        ProcessSignaturePolicy, SetProcessMitigationPolicy,
+        SetProcessMitigationPolicy,
     };
 
     /// The right to change an object's DACL (in `Win32_Storage_FileSystem`,
@@ -130,9 +128,6 @@ mod windows {
     /// keep their access.
     const PROCESS_SDDL: &str = "D:P(A;;GA;;;SY)(A;;0x101001;;;OW)";
 
-    /// `MicrosoftSignedOnly`: only Microsoft-signed DLLs may load from now
-    /// on, which blocks injecting an unsigned DLL.
-    const SIGNATURE_MICROSOFT_ONLY: u32 = 1 << 0;
     /// `NoRemoteImages | NoLowMandatoryLabelImages | PreferSystem32Images`.
     const IMAGE_LOAD_SAFE: u32 = 0b111;
 
@@ -145,9 +140,10 @@ mod windows {
         }
         restrict_process_access();
 
-        let mut signature = PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY::default();
-        signature.Anonymous.Flags = SIGNATURE_MICROSOFT_ONLY;
-        set_policy(ProcessSignaturePolicy, &signature);
+        // No MicrosoftSignedOnly signature policy: the WebAuthn call can
+        // need DLLs from other vendors (security software, input methods),
+        // and refusing them fails it with an opaque HRESULT. The process
+        // DACL already keeps the user's other processes from injecting one.
         let mut image_load = PROCESS_MITIGATION_IMAGE_LOAD_POLICY::default();
         image_load.Anonymous.Flags = IMAGE_LOAD_SAFE;
         set_policy(ProcessImageLoadPolicy, &image_load);
