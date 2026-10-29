@@ -137,7 +137,7 @@ mod windows {
             SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
             WerSetFlags(WER_FAULT_REPORTING_FLAG_NOHEAP);
         }
-        restrict_process_access();
+        let _ = set_dacl(unsafe { GetCurrentProcess() }, PROCESS_SDDL);
 
         // No MicrosoftSignedOnly signature policy: the WebAuthn call can
         // need DLLs from other vendors (security software, input methods),
@@ -146,10 +146,6 @@ mod windows {
         let mut image_load = PROCESS_MITIGATION_IMAGE_LOAD_POLICY::default();
         image_load.Anonymous.Flags = IMAGE_LOAD_SAFE;
         set_policy(ProcessImageLoadPolicy, &image_load);
-    }
-
-    fn restrict_process_access() {
-        let _ = set_dacl(unsafe { GetCurrentProcess() }, PROCESS_SDDL);
     }
 
     /// Open the file for writing (`GENERIC_WRITE`) and for setting its DACL,

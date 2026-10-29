@@ -22,8 +22,8 @@ that keeps your registry API token encrypted at rest. Only your FIDO2 security k
 
 Requirements: a FIDO2 key that supports `hmac-secret` (YubiKey 5, SoloKey,
 Nitrokey 3, Feitian, ...). On Linux and macOS, exactly one key must be
-plugged in. Supported on Linux, macOS and Windows. On macOS the process refuses debugger attachment, so
-it cannot be run under `lldb`.
+plugged in. Supported on Linux, macOS and Windows. On macOS the process
+refuses debugger attachment, so it cannot be run under `lldb`.
 
 On Windows, only elevated processes can talk to a FIDO key directly, so the
 provider goes through the Windows WebAuthn API instead (API version 4 or
