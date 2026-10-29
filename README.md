@@ -12,15 +12,17 @@ that keeps your registry API token encrypted at rest. Only your FIDO2 security k
    XChaCha20-Poly1305 key that encrypts the token. The registry URL is
    bound in as associated data.
 3. The store (`store.json` in `~/.config/cargo-credential-fido/` on Linux,
-   `~/Library/Application Support/cargo-credential-fido/` on macOS, mode
-   0600) holds only the credential id, salts, nonces and ciphertext. It is
-   useless without the physical key.
+   `~/Library/Application Support/cargo-credential-fido/` on macOS,
+   `%APPDATA%\cargo-credential-fido\` on Windows) holds only the credential
+   id, salts, nonces and ciphertext. It is readable only by you (mode 0600 on
+   Linux and macOS; on Windows, a DACL for you and SYSTEM in place of the
+   folder's permissions). It is useless without the physical key.
 4. Decrypting needs a touch on the key, plus the key's PIN if one is set.
    Cargo caches the token for the rest of that one cargo invocation only.
 
 Requirements: a FIDO2 key that supports `hmac-secret` (YubiKey 5, SoloKey,
-Nitrokey 3, Feitian, ...). Exactly one key must be plugged in. Supported on
-Linux, macOS and Windows. On macOS the process refuses debugger attachment, so
+Nitrokey 3, Feitian, ...). On Linux and macOS, exactly one key must be
+plugged in. Supported on Linux, macOS and Windows. On macOS the process refuses debugger attachment, so
 it cannot be run under `lldb`.
 
 On Windows, only elevated processes can talk to a FIDO key directly, so the
@@ -33,11 +35,9 @@ On Windows the process also stops other processes of the same user from
 opening it to read its memory (they can still borrow the handle cargo holds on
 it, so this raises the bar rather than closing the door), only loads
 Microsoft-signed DLLs once started, keeps its heap out of Windows Error
-Reporting dumps, and loads `webauthn.dll` from System32 only. The store file
-is readable only by the current user. Windows has no `mlockall`: to keep
-secrets out of the page file
-and hibernation file, use BitLocker or
-`fsutil behavior set EncryptPagingFile 1`.
+Reporting dumps, and loads `webauthn.dll` from System32 only. Windows has no
+`mlockall`: to keep secrets out of the page file and hibernation file, use
+BitLocker or `fsutil behavior set EncryptPagingFile 1`.
 
 ## Install
 
@@ -58,6 +58,8 @@ Line Tools are needed (Rust needs them for linking anyway):
 ```sh
 xcode-select --install
 ```
+
+On Windows, nothing beyond a Rust toolchain is needed.
 
 To install from a checkout of this repository instead, run
 `cargo install --path .`.
@@ -165,7 +167,10 @@ token is left in the file; store that one with `login INDEX_URL` instead.
 
 ## Tests
 
-`scripts/e2e.sh` runs the provider end to end against
+`cargo test` runs on every OS, using a software authenticator in place of a
+real key.
+
+On Linux, `scripts/e2e.sh` runs the provider end to end against
 [virtual-fido](https://github.com/rustafariandev/virtual-fido-rs), a software
 FIDO2 key that appears as a real HID device through `/dev/uhid`. It covers
 login, get, list, rotate, logout, configure, migrate, `cargo login`/`logout`
@@ -179,4 +184,6 @@ scripts/e2e.sh ../virtual-fido-rs/target/debug/virtual-fido
 ```
 
 CI (`.github/workflows/ci.yml`) runs rustfmt, clippy and `cargo test` on Linux,
-macOS and Windows, and this script on every push and pull request.
+macOS and Windows, and this script on Linux, on every push and pull request.
+The Windows WebAuthn backend has no automated end-to-end test, since it needs
+a real key and the Windows Security dialog.
