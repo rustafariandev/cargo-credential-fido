@@ -280,7 +280,7 @@ mod tests {
         #[cfg(windows)]
         assert_eq!(
             crate::secure::file_dacl(&path).unwrap(),
-            crate::secure::file_sddl().unwrap()
+            crate::secure::canonical_sddl(&crate::secure::file_sddl().unwrap()).unwrap()
         );
         fs::remove_dir_all(&dir).unwrap();
     }

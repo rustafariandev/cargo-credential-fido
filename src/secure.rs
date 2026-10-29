@@ -192,9 +192,7 @@ mod windows {
     /// The DACL of the file at `path`, in SDDL.
     #[cfg(test)]
     pub fn file_dacl(path: &std::path::Path) -> io::Result<String> {
-        use windows_sys::Win32::Security::Authorization::{
-            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SE_FILE_OBJECT,
-        };
+        use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
         use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
 
         let file = OpenOptions::new().access_mode(READ_CONTROL).open(path)?;
@@ -213,18 +211,53 @@ mod windows {
             if err != 0 {
                 return Err(io::Error::from_raw_os_error(err as i32));
             }
+            let sddl = dacl_sddl(descriptor);
+            LocalFree(descriptor);
+            sddl
+        }
+    }
+
+    /// `sddl` as Windows writes it back, with well-known SIDs as aliases
+    /// (the built-in Administrator's SID becomes `LA`), to compare with
+    /// `file_dacl`.
+    #[cfg(test)]
+    pub fn canonical_sddl(sddl: &str) -> io::Result<String> {
+        let sddl = wide(sddl);
+        let mut descriptor = null_mut();
+        unsafe {
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                null_mut(),
+            ) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let sddl = dacl_sddl(descriptor);
+            LocalFree(descriptor);
+            sddl
+        }
+    }
+
+    /// The DACL of `descriptor`, in SDDL.
+    #[cfg(test)]
+    unsafe fn dacl_sddl(
+        descriptor: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR,
+    ) -> io::Result<String> {
+        use windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
+
+        unsafe {
             let mut string = null_mut();
-            let ok = ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            if ConvertSecurityDescriptorToStringSecurityDescriptorW(
                 descriptor,
                 SDDL_REVISION_1,
                 DACL_SECURITY_INFORMATION,
                 &mut string,
                 null_mut(),
-            );
-            let err = io::Error::last_os_error();
-            LocalFree(descriptor);
-            if ok == 0 {
-                return Err(err);
+            ) == 0
+            {
+                return Err(io::Error::last_os_error());
             }
             let sddl = from_wide(string);
             LocalFree(string.cast());
@@ -339,7 +372,7 @@ pub fn raw_stdin() -> io::Result<File> {
 }
 
 #[cfg(all(test, windows))]
-pub use windows::{file_dacl, file_sddl};
+pub use windows::{canonical_sddl, file_dacl, file_sddl};
 
 #[cfg(windows)]
 pub fn raw_stdout() -> io::Result<File> {
