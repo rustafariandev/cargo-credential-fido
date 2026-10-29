@@ -17,11 +17,13 @@
 //! planted next to the executable.
 
 use super::{Authenticator, Credential, Key, RP_ID, new_key, random_bytes};
+use crate::win::{from_wide, wide, wide_eq};
 use anyhow::{Result, anyhow, bail};
 use std::ffi::{CStr, c_void};
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{HMODULE, HWND};
 use windows_sys::Win32::Networking::WindowsWebServices::*;
+use windows_sys::Win32::System::Console::GetConsoleWindow;
 use windows_sys::Win32::System::LibraryLoader::{
     GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
@@ -124,27 +126,27 @@ impl WebAuthnAuthenticator {
         Ok(Self { api })
     }
 
-    /// Run one assertion and return the hmac-secret outputs for `salt1` and,
-    /// if given, `salt2`.
-    fn hmac_secret(
+    /// Run one assertion and return the hmac-secret output for each of the
+    /// one or two salts.
+    fn hmac_secret<const N: usize>(
         &self,
         cred: &Credential,
-        salt1: &[u8; 32],
-        salt2: Option<&[u8; 32]>,
-    ) -> Result<(Key, Option<Key>)> {
+        salts: [&[u8; 32]; N],
+    ) -> Result<[Key; N]> {
+        const { assert!(N == 1 || N == 2, "hmac-secret takes one or two salts") };
         let rp_id = wide(RP_ID);
         let client_json = client_data("webauthn.get");
         let client = client_data_ref(&client_json);
 
-        let mut id = cred.id.clone();
         let mut allowed = WEBAUTHN_CREDENTIAL {
             dwVersion: WEBAUTHN_CREDENTIAL_CURRENT_VERSION,
-            cbId: len32(&id),
-            pbId: id.as_mut_ptr(),
+            cbId: len32(&cred.id),
+            // Windows does not write to it.
+            pbId: cred.id.as_ptr().cast_mut(),
             pwszCredentialType: WEBAUTHN_CREDENTIAL_TYPE_PUBLIC_KEY,
         };
-        let mut first = *salt1;
-        let mut second = salt2.copied();
+        let mut first = *salts[0];
+        let mut second = salts.get(1).map(|s| **s);
         let mut salt = WEBAUTHN_HMAC_SECRET_SALT {
             cbFirst: 32,
             pbFirst: first.as_mut_ptr(),
@@ -177,13 +179,7 @@ impl WebAuthnAuthenticator {
         eprintln!("Follow the Windows Security prompt to use your FIDO key.");
         let mut raw = null_mut();
         self.api.check(unsafe {
-            (self.api.get_assertion)(
-                GetForegroundWindow(),
-                rp_id.as_ptr(),
-                &client,
-                &opts,
-                &mut raw,
-            )
+            (self.api.get_assertion)(parent_window(), rp_id.as_ptr(), &client, &opts, &mut raw)
         })?;
         let assertion = AssertionGuard(&self.api, raw);
         let a = unsafe { &*assertion.1 };
@@ -203,16 +199,13 @@ impl WebAuthnAuthenticator {
             bail!("FIDO key did not return an hmac-secret");
         }
         let out = unsafe { &*a.pHmacSecret };
-        let key1 = unsafe { secret(out.pbFirst, out.cbFirst) }
-            .ok_or_else(|| anyhow!("FIDO key did not return an hmac-secret"))?;
-        let key2 = match salt2 {
-            None => None,
-            Some(_) => Some(
-                unsafe { secret(out.pbSecond, out.cbSecond) }
-                    .ok_or_else(|| anyhow!("FIDO key did not return both hmac-secret outputs"))?,
-            ),
-        };
-        Ok((key1, key2))
+        let outputs = [(out.pbFirst, out.cbFirst), (out.pbSecond, out.cbSecond)];
+        let keys: Vec<Key> = outputs[..N]
+            .iter()
+            .map_while(|&(ptr, len)| unsafe { secret(ptr, len) })
+            .collect();
+        keys.try_into()
+            .map_err(|_| anyhow!("FIDO key did not return every hmac-secret output"))
     }
 }
 
@@ -273,7 +266,7 @@ impl Authenticator for WebAuthnAuthenticator {
         let mut raw = null_mut();
         self.api.check(unsafe {
             (self.api.make_credential)(
-                GetForegroundWindow(),
+                parent_window(),
                 &rp,
                 &user,
                 &params,
@@ -304,7 +297,8 @@ impl Authenticator for WebAuthnAuthenticator {
     }
 
     fn derive_key(&self, cred: &Credential, salt: &[u8; 32]) -> Result<Key> {
-        Ok(self.hmac_secret(cred, salt, None)?.0)
+        let [key] = self.hmac_secret(cred, [salt])?;
+        Ok(key)
     }
 
     fn derive_key_pair(
@@ -313,10 +307,8 @@ impl Authenticator for WebAuthnAuthenticator {
         salt1: &[u8; 32],
         salt2: &[u8; 32],
     ) -> Result<(Key, Key)> {
-        match self.hmac_secret(cred, salt1, Some(salt2))? {
-            (a, Some(b)) => Ok((a, b)),
-            (_, None) => unreachable!("a second salt always gives a second output"),
-        }
+        let [key1, key2] = self.hmac_secret(cred, [salt1, salt2])?;
+        Ok((key1, key2))
     }
 }
 
@@ -396,26 +388,14 @@ fn len32(bytes: &[u8]) -> u32 {
     u32::try_from(bytes.len()).expect("WebAuthn buffers are small")
 }
 
-/// A NUL-terminated UTF-16 copy of `s`.
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain([0]).collect()
-}
-
-unsafe fn wide_slice<'a>(p: PCWSTR) -> &'a [u16] {
-    if p.is_null() {
-        return &[];
+/// The window the Windows Security dialog belongs to: the console cargo
+/// runs in, so the dialog stays with the terminal even if the user has
+/// switched to another window. Without a console, the foreground window.
+fn parent_window() -> HWND {
+    let console = unsafe { GetConsoleWindow() };
+    if console.is_null() {
+        unsafe { GetForegroundWindow() }
+    } else {
+        console
     }
-    let mut len = 0;
-    while unsafe { *p.add(len) } != 0 {
-        len += 1;
-    }
-    unsafe { std::slice::from_raw_parts(p, len) }
-}
-
-unsafe fn wide_eq(a: PCWSTR, b: PCWSTR) -> bool {
-    unsafe { wide_slice(a) == wide_slice(b) }
-}
-
-unsafe fn from_wide(p: PCWSTR) -> String {
-    String::from_utf16_lossy(unsafe { wide_slice(p) })
 }

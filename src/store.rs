@@ -169,8 +169,14 @@ fn decrypt(key: &[u8; 32], sealed: &SealedToken, index_url: &str) -> Result<Zero
                     aad: index_url.as_bytes(),
                 },
             )
+            // The key's output differs with and without the PIN, so a PIN
+            // mode mismatch looks the same as the wrong key.
             .map_err(|_| {
-                anyhow!("decryption failed: this token was sealed by a different FIDO key")
+                anyhow!(
+                    "decryption failed: this token was sealed by a different FIDO key, \
+                     or the key now uses its PIN differently (for example after \
+                     turning on alwaysUv; see the README)"
+                )
             })?,
     );
     let token = std::str::from_utf8(&plain).context("stored token is not UTF-8")?;
@@ -251,7 +257,10 @@ mod tests {
         let mut store = sealed(&auth);
         store.credential.as_mut().unwrap().uv = false;
         let err = store.unseal(&auth, URL).unwrap_err();
-        assert!(err.to_string().contains("decryption failed"), "{err}");
+        assert!(
+            err.to_string().contains("uses its PIN differently"),
+            "{err}"
+        );
     }
 
     #[test]

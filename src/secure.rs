@@ -142,7 +142,7 @@ mod windows {
     }
 
     fn restrict_process_access() {
-        let sddl: Vec<u16> = PROCESS_SDDL.encode_utf16().chain([0]).collect();
+        let sddl = crate::win::wide(PROCESS_SDDL);
         let mut descriptor = null_mut();
         unsafe {
             if ConvertStringSecurityDescriptorToSecurityDescriptorW(

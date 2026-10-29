@@ -18,6 +18,8 @@ mod config;
 mod fido;
 mod secure;
 mod store;
+#[cfg(windows)]
+mod win;
 
 use anyhow::{Result, bail};
 use cargo_credential::{
