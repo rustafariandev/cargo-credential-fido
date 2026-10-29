@@ -39,6 +39,28 @@ jobs:
       # Per OS, so the cfg(windows) and cfg(target_os = "macos") code is linted too.
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # Saving the store to a volume without ACLs (like a FAT or exFAT USB stick)
+      # skips the owner-only DACL instead of failing. The runner is elevated, so
+      # it can mount an exFAT virtual disk.
+      - name: Mount an exFAT virtual disk
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vhd = "$env:RUNNER_TEMP\no-acl.vhdx"
+          @"
+          create vdisk file="$vhd" maximum=64 type=expandable
+          select vdisk file="$vhd"
+          attach vdisk
+          create partition primary
+          format fs=exfat quick label=NOACL
+          assign
+          "@ | Set-Content -Encoding ascii "$env:RUNNER_TEMP\no-acl.diskpart"
+          diskpart /s "$env:RUNNER_TEMP\no-acl.diskpart"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $letter = (Get-Volume -FileSystemLabel NOACL).DriveLetter
+          "CARGO_CREDENTIAL_FIDO_TEST_NO_ACL_DIR=${letter}:\" >> $env:GITHUB_ENV
+      - if: runner.os == 'Windows'
+        run: cargo test -- --ignored save_works_on_a_volume_without_acls
 
   # Runs the provider against virtual-fido, a software FIDO2 key that appears as a
   # real HID device through /dev/uhid.

@@ -102,21 +102,20 @@ mod windows {
         DACL_SECURITY_INFORMATION, GetTokenInformation, PROTECTED_DACL_SECURITY_INFORMATION,
         SetKernelObjectSecurity, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
+    use windows_sys::Win32::Storage::FileSystem::{GetVolumeInformationByHandleW, WRITE_DAC};
     use windows_sys::Win32::System::Diagnostics::Debug::{
         SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SetErrorMode,
     };
     use windows_sys::Win32::System::ErrorReporting::{
         WER_FAULT_REPORTING_FLAG_NOHEAP, WerSetFlags,
     };
-    use windows_sys::Win32::System::SystemServices::PROCESS_MITIGATION_IMAGE_LOAD_POLICY;
+    use windows_sys::Win32::System::SystemServices::{
+        FILE_PERSISTENT_ACLS, PROCESS_MITIGATION_IMAGE_LOAD_POLICY,
+    };
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, OpenProcessToken, PROCESS_MITIGATION_POLICY, ProcessImageLoadPolicy,
         SetProcessMitigationPolicy,
     };
-
-    /// The right to change an object's DACL (in `Win32_Storage_FileSystem`,
-    /// which we otherwise do not need).
-    const WRITE_DAC: u32 = 0x0004_0000;
 
     /// The process DACL. SYSTEM keeps full access. The owner (this user) may
     /// only wait on, query and terminate the process (SYNCHRONIZE |
@@ -161,13 +160,80 @@ mod windows {
     }
 
     /// Give only SYSTEM and the current user access to `file`, replacing the
-    /// permissions it inherited from its directory.
+    /// permissions it inherited from its directory. Volumes that store no
+    /// ACLs (FAT, exFAT) are left as they are, like mode bits there on Unix.
     pub fn restrict_file(file: &File) -> io::Result<()> {
-        let sid = current_user_sid()?;
-        set_dacl(
-            file.as_raw_handle(),
-            &format!("D:P(A;;FA;;;SY)(A;;FA;;;{sid})"),
-        )
+        match set_dacl(file.as_raw_handle(), &file_sddl()?) {
+            Err(_) if !stores_acls(file) => Ok(()),
+            result => result,
+        }
+    }
+
+    /// The DACL `restrict_file` sets.
+    pub fn file_sddl() -> io::Result<String> {
+        Ok(format!("D:P(A;;FA;;;SY)(A;;FA;;;{})", current_user_sid()?))
+    }
+
+    /// Whether the volume `file` is on stores ACLs. Assumes it does if the
+    /// volume cannot be queried, so the original error is kept.
+    fn stores_acls(file: &File) -> bool {
+        let mut flags = 0;
+        let ok = unsafe {
+            GetVolumeInformationByHandleW(
+                file.as_raw_handle(),
+                null_mut(),
+                0,
+                null_mut(),
+                null_mut(),
+                &mut flags,
+                null_mut(),
+                0,
+            )
+        };
+        ok == 0 || flags & FILE_PERSISTENT_ACLS != 0
+    }
+
+    /// The DACL of the file at `path`, in SDDL.
+    #[cfg(test)]
+    pub fn file_dacl(path: &std::path::Path) -> io::Result<String> {
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SE_FILE_OBJECT,
+        };
+        use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
+
+        let file = OpenOptions::new().access_mode(READ_CONTROL).open(path)?;
+        unsafe {
+            let mut descriptor = null_mut();
+            let err = GetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                &mut descriptor,
+            );
+            if err != 0 {
+                return Err(io::Error::from_raw_os_error(err as i32));
+            }
+            let mut string = null_mut();
+            let ok = ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut string,
+                null_mut(),
+            );
+            let err = io::Error::last_os_error();
+            LocalFree(descriptor);
+            if ok == 0 {
+                return Err(err);
+            }
+            let sddl = from_wide(string);
+            LocalFree(string.cast());
+            Ok(sddl)
+        }
     }
 
     /// The current user's SID, as a string (`S-1-5-21-...`).
@@ -275,6 +341,9 @@ pub fn raw_stdin() -> io::Result<File> {
     use std::os::windows::io::AsHandle;
     Ok(io::stdin().as_handle().try_clone_to_owned()?.into())
 }
+
+#[cfg(all(test, windows))]
+pub use windows::{file_dacl, file_sddl};
 
 #[cfg(windows)]
 pub fn raw_stdout() -> io::Result<File> {

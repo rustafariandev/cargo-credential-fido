@@ -81,13 +81,21 @@ impl Store {
 
         // The rename keeps the temporary file's permissions.
         let tmp = path.with_extension("json.tmp");
-        let mut file = crate::secure::create_private(&tmp)
-            .with_context(|| format!("failed to write {}", tmp.display()))?;
+        let result = self.write_private(&tmp);
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        result.with_context(|| format!("failed to write {}", tmp.display()))?;
+        fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    fn write_private(&self, path: &Path) -> Result<()> {
+        let mut file = crate::secure::create_private(path)?;
         file.write_all(&serde_json::to_vec_pretty(self)?)?;
         file.sync_all()?;
-        // On Windows the file is opened unshared, so close it to rename it.
-        drop(file);
-        fs::rename(&tmp, path)?;
+        // On Windows the file is opened unshared; dropping it here closes
+        // it so it can be renamed.
         Ok(())
     }
 
@@ -269,6 +277,34 @@ mod tests {
             let mode = fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+        #[cfg(windows)]
+        assert_eq!(
+            crate::secure::file_dacl(&path).unwrap(),
+            crate::secure::file_sddl().unwrap()
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Needs a directory on a volume that stores no ACLs (FAT, exFAT) in
+    /// `CARGO_CREDENTIAL_FIDO_TEST_NO_ACL_DIR`; CI mounts one on Windows.
+    #[test]
+    #[ignore]
+    fn save_works_on_a_volume_without_acls() {
+        let dir = std::env::var_os("CARGO_CREDENTIAL_FIDO_TEST_NO_ACL_DIR")
+            .expect("CARGO_CREDENTIAL_FIDO_TEST_NO_ACL_DIR is not set");
+        let dir = Path::new(&dir).join(format!(
+            "cargo-credential-fido-test-{}",
+            hex::encode(random_bytes::<8>())
+        ));
+        let path = dir.join("store.json");
+        let auth = FakeAuthenticator::new(false);
+        let store = sealed(&auth);
+
+        store.save_to(&path).unwrap();
+        store.save_to(&path).unwrap();
+        let saved: Store = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.unseal(&auth, URL).unwrap().unwrap().as_str(), TOKEN);
+        assert!(!path.with_extension("json.tmp").exists());
         fs::remove_dir_all(&dir).unwrap();
     }
 
