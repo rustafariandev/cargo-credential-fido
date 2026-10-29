@@ -149,6 +149,13 @@ token is left in the file; store that one with `login INDEX_URL` instead.
   the key returns a different `hmac-secret` with and without user verification.
   Whether to use a PIN is decided once, at enrollment, from whether the key has
   a PIN set. To change it, delete the store file and run `login` again.
+  Changing the PIN itself is fine: the secret depends on whether the PIN is
+  used, not on its value.
+- Do not turn on `alwaysUv` on a key (an option on some keys, such as YubiKey
+  5.7+) while it holds tokens sealed without a PIN. The key then always uses
+  the PIN-verified secret, so those tokens can no longer be decrypted. Back
+  them up with `get` first, then delete the store file and run `login` again
+  for each one after turning it on.
 
 ## Tests
 
