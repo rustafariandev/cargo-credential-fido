@@ -2,7 +2,7 @@
 name = "cargo-credential-fido"
 version = "1.1.0"
 edition = "2024"
-description = "Cargo credential provider that keeps registry tokens encrypted with a FIDO2 security key"
+description = "Cargo credential provider that keeps registry API tokens encrypted at rest, decryptable only with a FIDO2 security key via the hmac-secret extension (XChaCha20-Poly1305). Requires a touch (and PIN if set) to use a token. Supports Linux, macOS and Windows (via the WebAuthn API, no admin rights needed)."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rustafariandev/cargo-credential-fido"
 readme = "README.md"

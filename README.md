@@ -1,5 +1,7 @@
 # cargo-credential-fido
 
+[![crates.io](https://img.shields.io/crates/v/cargo-credential-fido.svg)](https://crates.io/crates/cargo-credential-fido)
+
 A [cargo credential provider](https://doc.rust-lang.org/cargo/reference/registry-authentication.html)
 that keeps your registry API token encrypted at rest. Only your FIDO2 security key can decrypt it.
 
@@ -40,6 +42,8 @@ Reporting dumps, and loads `webauthn.dll` from System32 only. Windows has no
 BitLocker or `fsutil behavior set EncryptPagingFile 1`.
 
 ## Install
+
+The crate is published on [crates.io](https://crates.io/crates/cargo-credential-fido).
 
 ```sh
 cargo install cargo-credential-fido
