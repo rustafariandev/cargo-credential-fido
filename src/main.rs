@@ -21,7 +21,7 @@ mod store;
 #[cfg(windows)]
 mod win;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use cargo_credential::{
     Action, CacheControl, Credential, CredentialResponse, Error, RegistryInfo, Secret,
 };
@@ -101,6 +101,10 @@ fn unlock(store: &mut Store, auth: &dyn Authenticator) -> Result<fido::Credentia
     Ok(cred)
 }
 
+/// Added to a failure partway through `migrate` or `rotate`, which only
+/// write their files once every token is done.
+const NOTHING_CHANGED: &str = "stopped partway, nothing was changed (run the command again)";
+
 /// Move the plaintext tokens in cargo's credentials file into the store.
 /// Unless `keep` is set, they are then removed from the credentials file.
 fn migrate(keep: bool) -> Result<()> {
@@ -128,10 +132,17 @@ fn migrate(keep: bool) -> Result<()> {
     let mut store = Store::load()?;
     let auth = fido::open()?;
     let cred = unlock(&mut store, auth.as_ref())?;
-    for t in &tokens {
+    for (i, t) in tokens.iter().enumerate() {
         let index_url = t.index_url.as_deref().unwrap_or_default();
-        eprintln!("Encrypting the token for {} ({index_url}).", t.label());
-        store.seal(auth.as_ref(), &cred, index_url, &t.token)?;
+        eprintln!(
+            "Encrypting the token for {} ({index_url}), {} of {}.",
+            t.label(),
+            i + 1,
+            tokens.len()
+        );
+        store
+            .seal(auth.as_ref(), &cred, index_url, &t.token)
+            .context(NOTHING_CHANGED)?;
     }
     // Save before touching the credentials file, so a failure never leaves
     // a token in neither place.
@@ -189,9 +200,13 @@ fn rotate(index_urls: &[String]) -> Result<()> {
         bail!("no token stored for {missing}");
     }
     let auth = fido::open()?;
-    for url in index_urls {
-        eprintln!("Rotating salt for {url}.");
-        store.rotate(auth.as_ref(), url)?;
+    for (i, url) in index_urls.iter().enumerate() {
+        eprintln!(
+            "Rotating salt for {url}, {} of {}.",
+            i + 1,
+            index_urls.len()
+        );
+        store.rotate(auth.as_ref(), url).context(NOTHING_CHANGED)?;
     }
     // Save once at the end: if anything fails, the old entries stay intact.
     store.save()?;
