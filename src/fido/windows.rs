@@ -188,10 +188,16 @@ impl WebAuthnAuthenticator {
         // mismatch would only show up later as a decryption failure.
         let data = unsafe { slice(a.pbAuthenticatorData, a.cbAuthenticatorData) };
         if user_verified(data)? != cred.uv {
+            // Windows always verifies the PIN of a key that has one, even
+            // when asked not to, so the secret without the PIN is out of
+            // reach here.
             bail!(if cred.uv {
                 "the FIDO key did not verify the PIN, which this credential needs"
             } else {
-                "Windows verified a PIN, but this credential was registered without one"
+                "this credential was registered without a PIN, but the FIDO key now has \
+                 one, and Windows always uses it, so these tokens cannot be decrypted on \
+                 Windows. Read them with `get` on Linux or macOS, then delete the store \
+                 file and run `login` again"
             });
         }
 

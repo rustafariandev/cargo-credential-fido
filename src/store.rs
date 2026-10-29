@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 const STORE_VERSION: u32 = 1;
@@ -72,24 +72,22 @@ impl Store {
 
     /// Atomically write the store, readable only by the current user.
     pub fn save(&self) -> Result<()> {
-        let path = path()?;
+        self.save_to(&path()?)
+    }
+
+    fn save_to(&self, path: &Path) -> Result<()> {
         let dir = path.parent().ok_or_else(|| anyhow!("invalid store path"))?;
         fs::create_dir_all(dir)?;
 
+        // The rename keeps the temporary file's permissions.
         let tmp = path.with_extension("json.tmp");
-        let mut opts = fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut file = opts
-            .open(&tmp)
+        let mut file = crate::secure::create_private(&tmp)
             .with_context(|| format!("failed to write {}", tmp.display()))?;
         file.write_all(&serde_json::to_vec_pretty(self)?)?;
         file.sync_all()?;
-        fs::rename(&tmp, &path)?;
+        // On Windows the file is opened unshared, so close it to rename it.
+        drop(file);
+        fs::rename(&tmp, path)?;
         Ok(())
     }
 
@@ -249,6 +247,29 @@ mod tests {
     fn another_key_cannot_unseal() {
         let store = sealed(&FakeAuthenticator::new(false));
         assert!(store.unseal(&FakeAuthenticator::new(false), URL).is_err());
+    }
+
+    #[test]
+    fn save_writes_a_private_file_and_can_overwrite_it() {
+        let auth = FakeAuthenticator::new(false);
+        let store = sealed(&auth);
+        let dir = std::env::temp_dir().join(format!(
+            "cargo-credential-fido-test-{}",
+            hex::encode(random_bytes::<8>())
+        ));
+        let path = dir.join("store.json");
+
+        store.save_to(&path).unwrap();
+        store.save_to(&path).unwrap();
+        let saved: Store = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.unseal(&auth, URL).unwrap().unwrap().as_str(), TOKEN);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

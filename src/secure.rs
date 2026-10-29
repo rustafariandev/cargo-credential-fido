@@ -2,9 +2,10 @@
 //! control (the FIDO library, `rpassword`, `cargo-credential`, std).
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::mem::MaybeUninit;
+use std::path::Path;
 use zeroize::Zeroize;
 
 /// The system allocator, but every block is zeroed before it is freed.
@@ -86,13 +87,20 @@ pub fn harden() {
 
 #[cfg(windows)]
 mod windows {
+    use crate::win::{from_wide, wide};
+    use std::fs::{File, OpenOptions};
+    use std::io;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
     use std::ptr::null_mut;
-    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, HANDLE, LocalFree};
     use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        SDDL_REVISION_1,
     };
     use windows_sys::Win32::Security::{
-        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetKernelObjectSecurity,
+        DACL_SECURITY_INFORMATION, GetTokenInformation, PROTECTED_DACL_SECURITY_INFORMATION,
+        SetKernelObjectSecurity, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
     use windows_sys::Win32::System::Diagnostics::Debug::{
         SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SetErrorMode,
@@ -104,9 +112,13 @@ mod windows {
         PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY, PROCESS_MITIGATION_IMAGE_LOAD_POLICY,
     };
     use windows_sys::Win32::System::Threading::{
-        GetCurrentProcess, PROCESS_MITIGATION_POLICY, ProcessImageLoadPolicy,
+        GetCurrentProcess, OpenProcessToken, PROCESS_MITIGATION_POLICY, ProcessImageLoadPolicy,
         ProcessSignaturePolicy, SetProcessMitigationPolicy,
     };
+
+    /// The right to change an object's DACL (in `Win32_Storage_FileSystem`,
+    /// which we otherwise do not need).
+    const WRITE_DAC: u32 = 0x0004_0000;
 
     /// The process DACL. SYSTEM keeps full access. The owner (this user) may
     /// only wait on, query and terminate the process (SYNCHRONIZE |
@@ -142,7 +154,61 @@ mod windows {
     }
 
     fn restrict_process_access() {
-        let sddl = crate::win::wide(PROCESS_SDDL);
+        let _ = set_dacl(unsafe { GetCurrentProcess() }, PROCESS_SDDL);
+    }
+
+    /// Open the file for writing (`GENERIC_WRITE`) and for setting its DACL,
+    /// shared with no one, so no other handle can be opened on it before
+    /// `restrict_file` runs.
+    pub fn private_options(opts: &mut OpenOptions) {
+        opts.access_mode(GENERIC_WRITE | WRITE_DAC).share_mode(0);
+    }
+
+    /// Give only SYSTEM and the current user access to `file`, replacing the
+    /// permissions it inherited from its directory.
+    pub fn restrict_file(file: &File) -> io::Result<()> {
+        let sid = current_user_sid()?;
+        set_dacl(
+            file.as_raw_handle(),
+            &format!("D:P(A;;FA;;;SY)(A;;FA;;;{sid})"),
+        )
+    }
+
+    /// The current user's SID, as a string (`S-1-5-21-...`).
+    fn current_user_sid() -> io::Result<String> {
+        unsafe {
+            let mut token = null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // TOKEN_USER and the SID it points to; a SID is at most 68 bytes.
+            let mut buf = [0u64; 32];
+            let mut len = 0;
+            let ok = GetTokenInformation(
+                token,
+                TokenUser,
+                buf.as_mut_ptr().cast(),
+                size_of_val(&buf) as u32,
+                &mut len,
+            );
+            let err = io::Error::last_os_error();
+            CloseHandle(token);
+            if ok == 0 {
+                return Err(err);
+            }
+            let user = &*buf.as_ptr().cast::<TOKEN_USER>();
+            let mut string = null_mut();
+            if ConvertSidToStringSidW(user.User.Sid, &mut string) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let sid = from_wide(string);
+            LocalFree(string.cast());
+            Ok(sid)
+        }
+    }
+
+    fn set_dacl(handle: HANDLE, sddl: &str) -> io::Result<()> {
+        let sddl = wide(sddl);
         let mut descriptor = null_mut();
         unsafe {
             if ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -152,15 +218,20 @@ mod windows {
                 null_mut(),
             ) == 0
             {
-                return;
+                return Err(io::Error::last_os_error());
             }
-            SetKernelObjectSecurity(
-                GetCurrentProcess(),
+            let ok = SetKernelObjectSecurity(
+                handle,
                 DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
                 descriptor,
             );
+            let err = io::Error::last_os_error();
             LocalFree(descriptor);
+            if ok == 0 {
+                return Err(err);
+            }
         }
+        Ok(())
     }
 
     fn set_policy<T>(policy: PROCESS_MITIGATION_POLICY, value: &T) {
@@ -168,6 +239,24 @@ mod windows {
             SetProcessMitigationPolicy(policy, (value as *const T).cast(), size_of::<T>());
         }
     }
+}
+
+/// Create (or truncate) `path` for writing, readable only by the current
+/// user: mode 0o600 on Unix, a DACL for SYSTEM and the user on Windows.
+pub fn create_private(path: &Path) -> io::Result<File> {
+    let mut opts = OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    #[cfg(windows)]
+    windows::private_options(&mut opts);
+    let file = opts.open(path)?;
+    #[cfg(windows)]
+    windows::restrict_file(&file)?;
+    Ok(file)
 }
 
 /// Unbuffered handles on stdin and stdout. std's `Stdin` and `Stdout` keep

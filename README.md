@@ -33,8 +33,9 @@ On Windows the process also stops other processes of the same user from
 opening it to read its memory (they can still borrow the handle cargo holds on
 it, so this raises the bar rather than closing the door), only loads
 Microsoft-signed DLLs once started, keeps its heap out of Windows Error
-Reporting dumps, and is linked to load its system DLLs from System32 only
-(MSVC builds). Windows has no `mlockall`: to keep secrets out of the page file
+Reporting dumps, and loads `webauthn.dll` from System32 only. The store file
+is readable only by the current user. Windows has no `mlockall`: to keep
+secrets out of the page file
 and hibernation file, use BitLocker or
 `fsutil behavior set EncryptPagingFile 1`.
 
@@ -151,6 +152,11 @@ token is left in the file; store that one with `login INDEX_URL` instead.
   a PIN set. To change it, delete the store file and run `login` again.
   Changing the PIN itself is fine: the secret depends on whether the PIN is
   used, not on its value.
+- Setting a PIN on a key whose tokens were sealed without one locks those
+  tokens out on Windows: Windows always verifies the PIN of a key that has
+  one, so it can only reach the PIN-verified secret. Linux and macOS can still
+  open them. Back them up with `get` first, or read them on Linux or macOS,
+  then delete the store file and run `login` again.
 - Do not turn on `alwaysUv` on a key (an option on some keys, such as YubiKey
   5.7+) while it holds tokens sealed without a PIN. The key then always uses
   the PIN-verified secret, so those tokens can no longer be decrypted. Back
