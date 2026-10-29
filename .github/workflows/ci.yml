@@ -17,12 +17,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      # hidapi (via ctap-hid-fido2) links libudev.
-      - run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+          components: rustfmt
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
 
   test:
     strategy:
@@ -34,9 +30,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
+      # hidapi (via ctap-hid-fido2) links libudev.
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      # Per OS, so the cfg(windows) and cfg(target_os = "macos") code is linted too.
+      - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
   # Runs the provider against virtual-fido, a software FIDO2 key that appears as a

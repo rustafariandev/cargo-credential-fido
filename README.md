@@ -165,5 +165,5 @@ pip install "fido2==0.9.3"
 scripts/e2e.sh ../virtual-fido-rs/target/debug/virtual-fido
 ```
 
-CI (`.github/workflows/ci.yml`) runs rustfmt, clippy, `cargo test` on Linux and
-macOS, and this script on every push and pull request.
+CI (`.github/workflows/ci.yml`) runs rustfmt, clippy and `cargo test` on Linux,
+macOS and Windows, and this script on every push and pull request.
