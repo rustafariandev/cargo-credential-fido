@@ -9,12 +9,22 @@
 //! By default Windows treats hmac-secret salts as WebAuthn PRF inputs and
 //! hashes them. We set `WEBAUTHN_AUTHENTICATOR_HMAC_SECRET_VALUES_FLAG` to
 //! send them raw, as the HID backend does, so a store works on every OS.
+//!
+//! `webauthn.dll` is loaded at run time, from System32 only, rather than
+//! imported. An import is resolved before `main` runs: Windows without the
+//! DLL would refuse to start the process instead of letting us report that
+//! it is too old, and the default search order would load a `webauthn.dll`
+//! planted next to the executable.
 
 use super::{Authenticator, Credential, Key, RP_ID, new_key, random_bytes};
 use anyhow::{Result, anyhow, bail};
-use std::ffi::c_void;
+use std::ffi::{CStr, c_void};
 use std::ptr::{null, null_mut};
+use windows_sys::Win32::Foundation::{HMODULE, HWND};
 use windows_sys::Win32::Networking::WindowsWebServices::*;
+use windows_sys::Win32::System::LibraryLoader::{
+    GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 use windows_sys::core::{BOOL, HRESULT, PCWSTR};
 use zeroize::Zeroize;
@@ -28,18 +38,90 @@ const TIMEOUT_MS: u32 = 60_000;
 /// The user-verified bit in the authenticator data flags.
 const FLAG_UV: u8 = 0x04;
 
-pub struct WebAuthnAuthenticator;
+/// The `webauthn.dll` functions we call.
+struct Api {
+    get_api_version_number: unsafe extern "system" fn() -> u32,
+    get_assertion: unsafe extern "system" fn(
+        HWND,
+        PCWSTR,
+        *const WEBAUTHN_CLIENT_DATA,
+        *const WEBAUTHN_AUTHENTICATOR_GET_ASSERTION_OPTIONS,
+        *mut *mut WEBAUTHN_ASSERTION,
+    ) -> HRESULT,
+    make_credential: unsafe extern "system" fn(
+        HWND,
+        *const WEBAUTHN_RP_ENTITY_INFORMATION,
+        *const WEBAUTHN_USER_ENTITY_INFORMATION,
+        *const WEBAUTHN_COSE_CREDENTIAL_PARAMETERS,
+        *const WEBAUTHN_CLIENT_DATA,
+        *const WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS,
+        *mut *mut WEBAUTHN_CREDENTIAL_ATTESTATION,
+    ) -> HRESULT,
+    free_assertion: unsafe extern "system" fn(*const WEBAUTHN_ASSERTION),
+    free_credential_attestation: unsafe extern "system" fn(*const WEBAUTHN_CREDENTIAL_ATTESTATION),
+    get_error_name: unsafe extern "system" fn(HRESULT) -> PCWSTR,
+}
+
+impl Api {
+    fn load() -> Result<Self> {
+        let name = wide("webauthn.dll");
+        let module =
+            unsafe { LoadLibraryExW(name.as_ptr(), null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32) };
+        if module.is_null() {
+            bail!("this version of Windows is too old: it has no WebAuthn API (webauthn.dll)");
+        }
+        // The module is never freed, so the pointers stay valid for the life
+        // of the process. Each field's type matches the SDK prototype.
+        unsafe {
+            Ok(Self {
+                get_api_version_number: proc(module, c"WebAuthNGetApiVersionNumber")?,
+                get_assertion: proc(module, c"WebAuthNAuthenticatorGetAssertion")?,
+                make_credential: proc(module, c"WebAuthNAuthenticatorMakeCredential")?,
+                free_assertion: proc(module, c"WebAuthNFreeAssertion")?,
+                free_credential_attestation: proc(module, c"WebAuthNFreeCredentialAttestation")?,
+                get_error_name: proc(module, c"WebAuthNGetErrorName")?,
+            })
+        }
+    }
+
+    fn check(&self, hr: HRESULT) -> Result<()> {
+        if hr >= 0 {
+            return Ok(());
+        }
+        let name = unsafe { from_wide((self.get_error_name)(hr)) };
+        Err(anyhow!(
+            "WebAuthn request failed: {name} (HRESULT {hr:#010x})"
+        ))
+    }
+}
+
+/// Look up the function `name` in `module`.
+///
+/// # Safety
+///
+/// `F` must be a function pointer type matching the function's prototype.
+unsafe fn proc<F: Copy>(module: HMODULE, name: &CStr) -> Result<F> {
+    let f = unsafe { GetProcAddress(module, name.as_ptr().cast()) }
+        .ok_or_else(|| anyhow!("webauthn.dll has no {}", name.to_string_lossy()))?;
+    assert_eq!(size_of::<F>(), size_of_val(&f));
+    Ok(unsafe { std::mem::transmute_copy(&f) })
+}
+
+pub struct WebAuthnAuthenticator {
+    api: Api,
+}
 
 impl WebAuthnAuthenticator {
     pub fn open() -> Result<Self> {
-        let version = unsafe { WebAuthNGetApiVersionNumber() };
+        let api = Api::load()?;
+        let version = unsafe { (api.get_api_version_number)() };
         if version < MIN_API_VERSION {
             bail!(
                 "this version of Windows is too old: its WebAuthn API (version {version}) \
                  cannot return hmac-secret outputs; version {MIN_API_VERSION} is needed"
             );
         }
-        Ok(Self)
+        Ok(Self { api })
     }
 
     /// Run one assertion and return the hmac-secret outputs for `salt1` and,
@@ -94,8 +176,8 @@ impl WebAuthnAuthenticator {
 
         eprintln!("Follow the Windows Security prompt to use your FIDO key.");
         let mut raw = null_mut();
-        check(unsafe {
-            WebAuthNAuthenticatorGetAssertion(
+        self.api.check(unsafe {
+            (self.api.get_assertion)(
                 GetForegroundWindow(),
                 rp_id.as_ptr(),
                 &client,
@@ -103,8 +185,8 @@ impl WebAuthnAuthenticator {
                 &mut raw,
             )
         })?;
-        let assertion = AssertionGuard(raw);
-        let a = unsafe { &*assertion.0 };
+        let assertion = AssertionGuard(&self.api, raw);
+        let a = unsafe { &*assertion.1 };
 
         // The secret differs with and without user verification, so a
         // mismatch would only show up later as a decryption failure.
@@ -189,8 +271,8 @@ impl Authenticator for WebAuthnAuthenticator {
 
         eprintln!("Registering a new credential: follow the Windows Security prompt.");
         let mut raw = null_mut();
-        check(unsafe {
-            WebAuthNAuthenticatorMakeCredential(
+        self.api.check(unsafe {
+            (self.api.make_credential)(
                 GetForegroundWindow(),
                 &rp,
                 &user,
@@ -200,8 +282,8 @@ impl Authenticator for WebAuthnAuthenticator {
                 &mut raw,
             )
         })?;
-        let att = AttestationGuard(raw);
-        let a = unsafe { &*att.0 };
+        let att = AttestationGuard(&self.api, raw);
+        let a = unsafe { &*att.1 };
 
         let ext = unsafe { slice(a.Extensions.pExtensions, a.Extensions.cExtensions) };
         let hmac_enabled = ext.iter().any(|e| unsafe {
@@ -240,27 +322,27 @@ impl Authenticator for WebAuthnAuthenticator {
 
 /// Frees an assertion, wiping its hmac-secret outputs first: Windows
 /// allocated them, so our zeroizing allocator never sees them.
-struct AssertionGuard(*mut WEBAUTHN_ASSERTION);
+struct AssertionGuard<'a>(&'a Api, *mut WEBAUTHN_ASSERTION);
 
-impl Drop for AssertionGuard {
+impl Drop for AssertionGuard<'_> {
     fn drop(&mut self) {
         unsafe {
-            let a = &*self.0;
+            let a = &*self.1;
             if a.dwVersion >= WEBAUTHN_ASSERTION_VERSION_3 && !a.pHmacSecret.is_null() {
                 let out = &*a.pHmacSecret;
                 slice_mut(out.pbFirst, out.cbFirst).zeroize();
                 slice_mut(out.pbSecond, out.cbSecond).zeroize();
             }
-            WebAuthNFreeAssertion(self.0);
+            (self.0.free_assertion)(self.1);
         }
     }
 }
 
-struct AttestationGuard(*mut WEBAUTHN_CREDENTIAL_ATTESTATION);
+struct AttestationGuard<'a>(&'a Api, *mut WEBAUTHN_CREDENTIAL_ATTESTATION);
 
-impl Drop for AttestationGuard {
+impl Drop for AttestationGuard<'_> {
     fn drop(&mut self) {
-        unsafe { WebAuthNFreeCredentialAttestation(self.0) }
+        unsafe { (self.0.free_credential_attestation)(self.1) }
     }
 }
 
@@ -294,16 +376,6 @@ fn user_verified(auth_data: &[u8]) -> Result<bool> {
 unsafe fn secret(ptr: *const u8, len: u32) -> Option<Key> {
     let bytes = unsafe { slice(ptr, len) };
     <&[u8; 32]>::try_from(bytes).ok().map(new_key)
-}
-
-fn check(hr: HRESULT) -> Result<()> {
-    if hr >= 0 {
-        return Ok(());
-    }
-    let name = unsafe { from_wide(WebAuthNGetErrorName(hr)) };
-    Err(anyhow!(
-        "WebAuthn request failed: {name} (HRESULT {hr:#010x})"
-    ))
 }
 
 unsafe fn slice<'a, T>(ptr: *const T, len: u32) -> &'a [T] {
